@@ -1,4 +1,4 @@
-from numpy import array, vstack, isin, inf 
+from numpy import array, vstack, isin, sin, cos, sinh, cosh, power, inf, pi
 from torch import device, cuda, FloatTensor
 devicee = device("cuda:0" if cuda.is_available() else "cpu")
 
@@ -68,3 +68,12 @@ def form_condition_arrays(BC_arr):
     f = FloatTensor(f).to(devicee)
 
     return x, y, t, f
+
+def Poisson_analytical(mu, Q0, w, x, y, chi, H, L, K):
+    """
+    Возвращает аналитическое решение уравнения Пуассона при нулевой концентрации
+    """
+    pp = x / H
+    for k in range(1,K):
+        pp += 2 / (pi * k * chi) * power(-1, k%2) * sin(pi * k * chi / H) * cos( 2 * pi * k * y / H) * sinh( 2 * pi * k * (x - L / 2) / H) / (2 * pi * k / H * cosh(2 * pi * k * L / 2 / H))
+    return 12 * mu * Q0 / power(w,3) * pp
