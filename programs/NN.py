@@ -73,7 +73,7 @@ class Net(nn.Module):
         # self.IC_x = self.IC_y = self.IC_t = self.IC_f = data[11], data[12], data[13], data[14] 
         # self.collocation = data[15]
         # self.loss_PDE = self.loss_BC = self.loss_IC = 0
-        self.losses = data[0]
+        self.losses = data[0].tolist()
 
 
     def full_save(self, path_nn, path_data):
