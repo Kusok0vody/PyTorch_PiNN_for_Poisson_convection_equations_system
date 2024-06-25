@@ -171,8 +171,6 @@ class Solver():
         y_line = np.arange(0,self.sh[0]*self.dy, self.dy)
         psi = 1 / self.chi * np.where(np.abs(y_line - y_line[-1] / 2) < self.chi/2, 1, 0)
 
-        self.c[0,:,0] = self.c_in * psi * self.chi
-
         k = 0
         while np.round(self.t[-1],5) < t_end:
             start_time = time.time()
@@ -227,5 +225,7 @@ class Solver():
                                     f'1/{self.times[-1]}\t','|',
                                     f'{np.round(t_end/self.dt[0]*np.mean(self.times), 5)}', '|']])
             print(self.print_tab.draw())
+            if k==1:
+                self.c[1,:,0] = self.c_in * psi * self.chi
 
             k += 1
