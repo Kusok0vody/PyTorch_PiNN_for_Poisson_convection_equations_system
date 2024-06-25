@@ -59,8 +59,224 @@ class Net(nn.Module):
         return outputs
 
 
-class Poisson_Convection:
+    def set_optimizer(self, optimizer_type:str):
+        """
+        Sets the optimizer for Neural Network
+        
+        Types: Adam, LBFGS
+        """
+        if optimizer_type=='Adam':
+            return torch.optim.Adam(self.parameters())
+        if optimizer_type=='LBFGS':
+            return torch.optim.LBFGS(self.parameters(),
+                                     lr=0.001, 
+                                     max_iter=50000, 
+                                     max_eval=50000, 
+                                     history_size=50,
+                                     tolerance_grad=1e-12, 
+                                     tolerance_change=0.5 * np.finfo(float).eps,
+                                     line_search_fn="strong_wolfe")
 
+
+    @staticmethod
+    def derivative(dx, x, order=1):
+        """
+        Calculates the derivative of a given array
+        """
+        for _ in range(order):
+            dx = grad(outputs=dx, inputs=x, grad_outputs = torch.ones_like(dx), create_graph=True, retain_graph=True, allow_unused=True)[0]
+
+        return dx
+    
+
+    def load(self, path:str):
+        """
+        Loads NN from file
+        """
+        self.model.load_state_dict(torch.load(path))
+
+
+    def save(self, path:str):
+        """
+        Saves NN to file
+        """
+        torch.save(self.model.state_dict(), path)
+    
+
+class Poisson:
+    def __init__(self,
+                 size:list,
+                 cond:list,
+                 collocation:int,
+                 ranges:list):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.model = Net(input_size=2,
+                         neurons_arr=[32,16,16,8,8],
+                         output_size=1,
+                         depth=4,
+                         act=Sin).to(self.device)
+        # Technical Variables
+        self.Adam_epochs = 5000
+        self.losses=[]
+        self.epoch = 0
+        self.BC_len = ranges[0].shape[0]
+        self.zeros = np.zeros(self.BC_len)
+        self.ones = np.ones(self.BC_len)
+        self.print_tab = Texttable()
+        self.criterion = torch.nn.MSELoss()
+        self.weights = [1,1,1]
+        self.optimizer = self.model.set_optimizer('Adam')
+        self.collocation = collocation
+
+        # Constants and conditions
+        self.size = size
+        self.ranges = ranges
+        self.cond = cond
+        self.p_cond = cond
+        self.makeIBC()
+
+        x_collocation = torch.linspace(self.size[0], self.size[1], self.collocation).to(self.device)
+        y_collocation = torch.linspace(self.size[2], self.size[3], self.collocation).to(self.device)
+
+        self.XY = torch.stack(torch.meshgrid(x_collocation, y_collocation)).reshape(2, -1).T
+        self.XY.requires_grad = True
+        self.X = Variable(self.XY[:,0], requires_grad=True).to(self.device)
+        self.Y = Variable(self.XY[:,1], requires_grad=True).to(self.device)
+    
+
+    def full_load(self, path_nn:str, path_data:str):
+        """
+        Loads NN and other parameters (temporarily only losses) from file
+        """
+        self.model.load_state_dict(torch.load(path_nn))
+        data = np.load(path_data)
+        self.losses = data[0].tolist()
+
+
+    def full_save(self, path_nn:str, path_data:str):
+        """
+        Saves NN and other parameters (temporarily only losses) from file
+        """
+        torch.save(self.model.state_dict(), path_nn)
+        data = [self.losses]
+        np.save(path_data, data)
+
+
+    def makeIBC(self):
+        """
+        Makes boundary conditions
+        """
+        condition = cnd.form_boundaries(self.ranges, self.p_cond[0], self.ones, self.zeros)
+        self.f, XY = cnd.form_condition_arrays(condition)
+        self.x = XY[0]
+        self.y = XY[1]
+
+
+    def check_BC(self, cond, u, u_tb, u_lr, x, y):
+        """
+        Makes the Neumann condition on those boundaries where it is required
+        """
+        u_x = self.model.derivative(u_lr, x)
+        u_y = self.model.derivative(u_tb, y)
+
+        if cond[0]==1:
+            u[:self.BC_len] = u_y[:self.BC_len]
+        if cond[1]==1:
+            u[self.BC_len:2*self.BC_len] = u_y[self.BC_len:]
+        if cond[2]==1:
+            u[2*self.BC_len:3*self.BC_len] = u_x[:self.BC_len]
+        if cond[3]==1:
+            u[3*self.BC_len:] = u_x[self.BC_len:]
+
+        return u
+
+
+    def PDELoss(self):
+        """
+        Calculates the loss from PDE
+        """
+        u = self.model([self.X, self.Y])
+
+        p_x = self.model.derivative(u, self.X)
+        p_y = self.model.derivative(u, self.Y)
+
+        p_xx = self.model.derivative(p_x, self.X)
+        p_yy = self.model.derivative(p_y, self.Y)
+
+        p = p_xx + p_yy
+
+        loss = self.weights[0] * self.criterion(torch.zeros_like(p), p)
+
+        return loss
+    
+
+    def loss_function(self):
+        """
+        Closure function; calculates all losses (IC, BC, PDE)
+        """
+        self.optimizer.zero_grad()
+
+        # Boundary conditions
+        pt_x_tb = Variable(self.x[:2*self.BC_len], requires_grad=True).to(self.device)
+        pt_y_tb = Variable(self.y[:2*self.BC_len], requires_grad=True).to(self.device)
+
+        pt_x_lr = Variable(self.x[2*self.BC_len:], requires_grad=True).to(self.device)
+        pt_y_lr = Variable(self.y[2*self.BC_len:], requires_grad=True).to(self.device)
+
+        pt_p = Variable(self.f, requires_grad=True).to(self.device)
+
+        prediction_top_bottom = self.model([pt_x_tb, pt_y_tb])
+        prediction_left_right = self.model([pt_x_lr, pt_y_lr])
+
+        prediction_BC = torch.cat((prediction_top_bottom, prediction_left_right))
+
+        prediction_p = self.check_BC(self.cond[1], prediction_BC.reshape(-1), prediction_top_bottom, prediction_left_right, pt_x_lr, pt_y_tb)
+
+        loss_BC = self.weights[1] * self.criterion(pt_p, prediction_p)
+        if torch.isnan(loss_BC)==True:
+            raise ValueError("nan value reached")
+
+        # PDE
+        loss_PDE = self.PDELoss()
+        if torch.isnan(loss_PDE)==True:
+            raise ValueError("nan value reached")
+
+        loss = loss_PDE + loss_BC
+        loss.backward()
+        
+        self.losses.append(loss.item())
+
+        if self.epoch % 10 == 0:
+            self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
+                                      f'{loss_PDE}\t','|',
+                                      f'{loss_BC}\t','|',
+                                      f'{self.losses[-1]}\t','|']])
+            print(self.print_tab.draw())
+        self.epoch += 1
+
+        return loss
+
+
+    def train(self):
+        """
+        The main function of Net training
+        """
+        self.print_tab.set_deco(Texttable.HEADER)
+        self.print_tab.set_cols_width([1,15,1,25,1,25,1,25,1])
+        self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','BC loss','|','Summary loss','|']])
+        print(self.print_tab.draw())
+        self.model.train()
+
+        self.optimizer = self.model.set_optimizer('Adam')
+
+        if self.epoch <= self.Adam_epochs+1:
+            for _ in range(self.epoch, self.Adam_epochs+1):
+                self.optimizer.step(self.loss_function)
+        
+        self.optimizer = self.model.set_optimizer('LBFGS')
+        self.optimizer.step(self.loss_function)
+
+class Poisson_Convection:
     def __init__(self,
                  w:np.float64,
                  mu0:np.float64,
@@ -74,13 +290,11 @@ class Poisson_Convection:
                  ranges:list):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        self.model = Net(
-            input_size=3,
-            neurons_arr=[32,16,16,8,8],
-            output_size=2,
-            depth=4,
-            act=Sin
-        ).to(self.device)
+        self.model = Net(input_size=3,
+                         neurons_arr=[32,16,16,8,8],
+                         output_size=2,
+                         depth=4,
+                         act=Sin).to(self.device)
         
         # Technical Variables
         self.Adam_epochs = 5000
@@ -94,7 +308,7 @@ class Poisson_Convection:
         self.criterion = torch.nn.MSELoss()
         self.weights = [1,1,1,1]
         self.CL = False
-        self.optimizer = self.set_optimizer('Adam')
+        self.optimizer = self.model.set_optimizer('Adam')
         self.collocation = collocation
 
         # Constants and conditions
@@ -118,20 +332,6 @@ class Poisson_Convection:
         self.X = Variable(self.XYT[:,0], requires_grad=True).to(self.device)
         self.Y = Variable(self.XYT[:,1], requires_grad=True).to(self.device)
         self.T = Variable(self.XYT[:,2], requires_grad=True).to(self.device)
-
-
-    def load(self, path:str):
-        """
-        Loads NN from file
-        """
-        self.model.load_state_dict(torch.load(path))
-
-
-    def save(self, path:str):
-        """
-        Saves NN to file
-        """
-        torch.save(self.model.state_dict(), path)
     
 
     def full_load(self, path_nn:str, path_data:str):
@@ -173,32 +373,23 @@ class Poisson_Convection:
         self.IC_c = c_initial
 
         # BC for c
-        c_condition = cnd.form_boundaries(self.ranges[0], self.ranges[1], self.ranges[2],
-                                           self.c_cond[0], self.ones, self.zeros)
-        self.c_f, self.x, self.y, self.t = cnd.form_condition_arrays(c_condition)
+        c_condition = cnd.form_boundaries(self.ranges, self.c_cond[0], self.ones, self.zeros)
+        self.c_f, XYT = cnd.form_condition_arrays(c_condition)
+        self.x = XYT[0]
+        self.y = XYT[1]
+        self.t = XYT[2]
 
         # BC for p
-        p_condition = cnd.form_boundaries(self.ranges[0], self.ranges[1], self.ranges[2],
-                                          self.p_cond[0], self.ones, self.zeros)
-        self.p_f, _, _, _ = cnd.form_condition_arrays(p_condition)
-
-    @staticmethod
-    def derivative(dx, x, order=1):
-        """
-        Calculates the derivative of a given array
-        """
-        for _ in range(order):
-            dx = grad(outputs=dx, inputs=x, grad_outputs = torch.ones_like(dx), create_graph=True, retain_graph=True, allow_unused=True)[0]
-
-        return dx
+        p_condition = cnd.form_boundaries(self.ranges, self.p_cond[0], self.ones, self.zeros)
+        self.p_f, _ = cnd.form_condition_arrays(p_condition)
 
 
     def check_BC(self, cond, u, u_tb, u_lr, x, y):
         """
         Makes the Neumann condition on those boundaries where it is required
         """
-        u_x = self.derivative(u_lr, x)
-        u_y = self.derivative(u_tb, y)
+        u_x = self.model.derivative(u_lr, x)
+        u_y = self.model.derivative(u_tb, y)
 
         if cond[0]==1:
             u[:self.BC_len] = u_y[:self.BC_len]
@@ -211,24 +402,6 @@ class Poisson_Convection:
 
         return u
 
-    def set_optimizer(self, optimizer_type:str):
-        """
-        Sets the optimizer for Neural Network
-        
-        Types: Adam, LBFGS
-        """
-        if optimizer_type=='Adam':
-            return torch.optim.Adam(self.model.parameters())
-        if optimizer_type=='LBFGS':
-            return torch.optim.LBFGS(self.model.parameters(),
-                                     lr=0.001, 
-                                     max_iter=50000, 
-                                     max_eval=50000, 
-                                     history_size=50,
-                                     tolerance_grad=1e-12, 
-                                     tolerance_change=0.5 * np.finfo(float).eps,
-                                     line_search_fn="strong_wolfe")
-
 
     def PDELoss(self):
         """
@@ -237,20 +410,20 @@ class Poisson_Convection:
         u = self.model([self.X, self.Y, self.T])
         u[:,1] = torch.clamp(u[:,1].clone(), min=0, max=self.cmax-0.0000001)
 
-        p_x = self.derivative(u[:,0], self.X)
-        p_y = self.derivative(u[:,0], self.Y)
+        p_x = self.model.derivative(u[:,0], self.X)
+        p_y = self.model.derivative(u[:,0], self.Y)
 
         mu = self.mu0 * (1 - u[:,1] / self.cmax).pow(-2.5)
 
         v_x = -self.w**2 * p_x / (12 * mu)
         v_y = -self.w**2 * p_y / (12 * mu)
 
-        c_x = self.derivative(u[:,1]*v_x, self.X)
-        c_y = self.derivative(u[:,1]*v_y, self.Y)
-        c_t = self.derivative(u[:,1],     self.T)
+        c_x = self.model.derivative(u[:,1]*v_x, self.X)
+        c_y = self.model.derivative(u[:,1]*v_y, self.Y)
+        c_t = self.model.derivative(u[:,1],     self.T)
 
-        p_xx = self.derivative(p_x / mu, self.X)
-        p_yy = self.derivative(p_y / mu, self.Y)
+        p_xx = self.model.derivative(p_x / mu, self.X)
+        p_yy = self.model.derivative(p_y / mu, self.Y)
 
         c = c_t + c_x + c_y
         p = p_xx + p_yy
@@ -347,13 +520,13 @@ class Poisson_Convection:
         print(self.print_tab.draw())
         self.model.train()
 
-        self.optimizer = self.set_optimizer('Adam')
+        self.optimizer = self.model.set_optimizer('Adam')
 
         if self.epoch <= self.Adam_epochs+1:
             for _ in range(self.epoch, self.Adam_epochs+1):
                 self.optimizer.step(self.loss_function)
         
-        self.optimizer = self.set_optimizer('LBFGS')
+        self.optimizer = self.model.set_optimizer('LBFGS')
         self.optimizer.step(self.loss_function)
 
     
@@ -378,12 +551,12 @@ class Poisson_Convection:
                 self.makeIBC()
 
                 self.epoch=0
-                self.optimizer = self.set_optimizer('Adam')
+                self.optimizer = self.model.set_optimizer('Adam')
                 if self.epoch <= self.Adam_epochs+1:
                     for _ in range(self.epoch, self.Adam_epochs+1):
                         self.optimizer.step(self.loss_function)
                 
-                self.optimizer = self.set_optimizer('LBFGS')
+                self.optimizer = self.model.set_optimizer('LBFGS')
                 self.optimizer.step(self.loss_function)
 
                 self.full_save(f'data/CL_v_in,{constants["v_in"]}/{param}', f'data/CL_v_in,{constants["v_in"]}/{param}_data')
