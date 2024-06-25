@@ -163,3 +163,9 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
   plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
   plt.grid()
   plt.title('Right')
+
+def plot_loss(loss):
+  plt.semilogy(loss, c='black')
+  plt.title('Loss')
+  plt.xlabel('iterations')
+  plt.grid()
