@@ -1,219 +1,394 @@
 import numpy as np 
-
+import os
 import torch
 import torch.nn as nn
 
 from torch.autograd import Variable
 from torch.autograd import grad
-from torch import FloatTensor
+
 from texttable import Texttable
+from collections import OrderedDict
+
+import programs.conditions as cnd
+
+
+class Sin(nn.Module):
+    """
+    sin activation function for Neural Network
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        sin = torch.sin(input)
+        return sin
 
 
 class Net(nn.Module):
+    """
+    The main Class for all Neural Networks
+    """
+    def __init__(
+        self,
+        input_size:int,
+        neurons_arr:list[int],
+        output_size:int,
+        depth:int,
+        act,):
 
-    def __init__(self, device):
         super(Net, self).__init__()
-        self.neurons_per_layer = 20
-        self.fc1 = nn.Linear(3, self.neurons_per_layer)
-        self.fc2 = nn.Linear(self.neurons_per_layer, self.neurons_per_layer)
-        self.fc3 = nn.Linear(self.neurons_per_layer, self.neurons_per_layer)
-        self.fc4 = nn.Linear(self.neurons_per_layer, self.neurons_per_layer)
-        self.fc5 = nn.Linear(self.neurons_per_layer, 2)
+        
+        layers = [('input', torch.nn.Linear(input_size, neurons_arr[0]))]
+        layers.append(('input_activation', act()))
+        for i in range(depth): 
+            layers.append(
+                ('hidden_%d' % i, torch.nn.Linear(neurons_arr[i], neurons_arr[i+1]))
+            )
+            layers.append(('activation_%d' % i, act()))
+        layers.append(('output', torch.nn.Linear(neurons_arr[-1], output_size)))
 
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        self.sin = torch.sin
+        layerDict = OrderedDict(layers)
+        self.layers = torch.nn.Sequential(layerDict)
 
-        # Объявление констант
-        self.w = 1
-        self.mu0 = 1
-        self.cmax = 1
-        self.c_BC_x = self.c_BC_y = self.c_BC_t = self.c_BC_f = None
-        self.p_BC_x = self.p_BC_y = self.p_BC_t = self.p_BC_f = None
-        self.IC_x = self.IC_y = self.IC_t = self.IC_f = None
-        self.collocation = 1000
-        self.weights = [1,1,1]
-        self.optim = 'Adam'
-        self.boundaries = []
-        self.device = device
 
-        self.loss_PDE = self.loss_BC = self.loss_IC = 0
-        self.losses=[0]
+    def forward(self, inputs:list):
+        inputs_united = inputs[0].reshape(-1, 1)
+        for i in range(1, len(inputs)):
+            inputs_united = torch.cat([inputs_united, inputs[i].reshape(-1, 1)], axis=1)
+        outputs = self.layers(inputs_united)
+        return outputs
+
+
+class Poisson_Convection:
+
+    def __init__(self,
+                 w:np.float64,
+                 mu0:np.float64,
+                 cmax:np.float64,
+                 v_in:np.float64,
+                 chi:np.float64,
+                 size:list,
+                 c_cond:list,
+                 p_cond:list,
+                 collocation:int,
+                 ranges:list):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        self.model = Net(
+            input_size=3,
+            neurons_arr=[32,16,16,8,8],
+            output_size=2,
+            depth=4,
+            act=Sin
+        ).to(self.device)
+        
+        # Technical Variables
+        self.Adam_epochs = 5000
+        self.losses=[]
         self.epoch = 0
+        self.const = 0
+        self.BC_len = ranges[0].shape[0]
+        self.zeros = np.zeros(self.BC_len)
+        self.ones = np.ones(self.BC_len)
         self.print_tab = Texttable()
         self.criterion = torch.nn.MSELoss()
+        self.weights = [1,1,1,1]
+        self.CL = False
+        self.optimizer = self.set_optimizer('Adam')
+        self.collocation = collocation
+
+        # Constants and conditions
+        self.w = w
+        self.mu0 = mu0
+        self.cmax = cmax
+        self.v_in = v_in
+        self.chi = chi
+        self.size = size
+        self.ranges = ranges
+        self.c_cond = c_cond
+        self.p_cond = p_cond
+        self.makeIBC()
+
+        x_collocation = torch.linspace(self.size[0], self.size[1], self.collocation).to(self.device)
+        y_collocation = torch.linspace(self.size[2], self.size[3], self.collocation).to(self.device)
+        t_collocation = torch.linspace(self.size[4], self.size[5], self.collocation).to(self.device)
+
+        self.XYT = torch.stack(torch.meshgrid(x_collocation, y_collocation, t_collocation)).reshape(3, -1).T
+        self.XYT.requires_grad = True
+        self.X = Variable(self.XYT[:,0], requires_grad=True).to(self.device)
+        self.Y = Variable(self.XYT[:,1], requires_grad=True).to(self.device)
+        self.T = Variable(self.XYT[:,2], requires_grad=True).to(self.device)
 
 
-    def forward(self, x, y, t):
-        inputs = torch.cat([x.reshape(-1, 1), y.reshape(-1, 1), t.reshape(-1, 1)], axis=1)
-        output = self.sin(self.fc1(inputs))
-        output = self.sin(self.fc2(output))
-        output = self.sin(self.fc3(output))
-        output = self.sin(self.fc4(output))
-        output = self.fc5(output) 
-        return output
+    def load(self, path:str):
+        """
+        Loads NN from file
+        """
+        self.model.load_state_dict(torch.load(path))
 
 
-    def load(self,path):
-        self.load_state_dict(torch.load(path))
-
-
-    def save(self, path):
-        torch.save(self.state_dict(), path)
+    def save(self, path:str):
+        """
+        Saves NN to file
+        """
+        torch.save(self.model.state_dict(), path)
     
 
-    def full_load(self, path_nn, path_data):
-        self.load_state_dict(torch.load(path_nn))
+    def full_load(self, path_nn:str, path_data:str):
+        """
+        Loads NN and other parameters (temporarily only losses) from file
+        """
+        self.model.load_state_dict(torch.load(path_nn))
         data = np.load(path_data)
-        # self.w = data[0]
-        # self.mu0 = data[1]
-        # self.cmax = data[2]
-        # self.c_BC_x, self.c_BC_y, self.c_BC_t, self.c_BC_f = data[3], data[4], data[5], data[6] 
-        # self.p_BC_x, self.p_BC_y, self.p_BC_t, self.p_BC_f = data[7], data[8], data[9], data[10] 
-        # self.IC_x = self.IC_y = self.IC_t = self.IC_f = data[11], data[12], data[13], data[14] 
-        # self.collocation = data[15]
-        # self.loss_PDE = self.loss_BC = self.loss_IC = 0
         self.losses = data[0].tolist()
 
 
-    def full_save(self, path_nn, path_data):
-        torch.save(self.state_dict(), path_nn)
-        # data = [self.w, self.mu0, self.cmax,
-        #                     self.c_BC_x.cpu().numpy(), self.c_BC_y.cpu().numpy(), self.c_BC_t.cpu().numpy(), self.c_BC_f.cpu().numpy(), 
-        #                     self.p_BC_x.cpu().numpy(), self.p_BC_y.cpu().numpy(), self.p_BC_t.cpu().numpy(), self.p_BC_f.cpu().numpy(),
-        #                     self.IC_x.cpu().numpy(), self.IC_y.cpu().numpy(), self.IC_t.cpu().numpy(), self.IC_f.cpu().numpy(),
-        #                     self.collocation, np.array(self.losses)]
+    def full_save(self, path_nn:str, path_data:str):
+        """
+        Saves NN and other parameters (temporarily only losses) from file
+        """
+        torch.save(self.model.state_dict(), path_nn)
         data = [self.losses]
         np.save(path_data, data)
 
 
-    def optimizer(self, optimizer_type):
+    def makeIBC(self):
+        """
+        Makes initial and boundary conditions
+        """
+        self.IC_x = torch.linspace(self.size[0], self.size[1], int(self.BC_len/1000)).to(self.device)
+        self.IC_y = torch.linspace(self.size[2], self.size[3], int(self.BC_len/1000)).to(self.device)
+        self.IC_t = torch.zeros(int(self.BC_len/1000)).to(self.device)
+
+        IC_XYT = torch.stack(torch.meshgrid(self.IC_x, self.IC_y, self.IC_t)).reshape(3, -1).T
+
+        self.IC_x = Variable(IC_XYT[:,0], requires_grad=True).to(self.device)
+        self.IC_y = Variable(IC_XYT[:,1], requires_grad=True).to(self.device)
+        self.IC_t = Variable(IC_XYT[:,2], requires_grad=True).to(self.device)
+
+        c_initial = torch.zeros(self.IC_x.shape).to(self.device)
+        # for i in range(len(self.IC_x)):
+        #     if self.IC_x[i]==1 and torch.abs(self.IC_y[i] - torch.max(self.IC_y) / 2) <= self.chi / 2:
+        #         c_initial[i] = np.max(self.c_cond[0][3]) 
+        self.IC_c = c_initial
+
+        # BC for c
+        c_condition = cnd.form_boundaries(self.ranges[0], self.ranges[1], self.ranges[2],
+                                           self.c_cond[0], self.ones, self.zeros)
+        self.c_f, self.x, self.y, self.t = cnd.form_condition_arrays(c_condition)
+
+        # BC for p
+        p_condition = cnd.form_boundaries(self.ranges[0], self.ranges[1], self.ranges[2],
+                                          self.p_cond[0], self.ones, self.zeros)
+        self.p_f, _, _, _ = cnd.form_condition_arrays(p_condition)
+
+    @staticmethod
+    def derivative(dx, x, order=1):
+        """
+        Calculates the derivative of a given array
+        """
+        for _ in range(order):
+            dx = grad(outputs=dx, inputs=x, grad_outputs = torch.ones_like(dx), create_graph=True, retain_graph=True, allow_unused=True)[0]
+
+        return dx
+
+
+    def check_BC(self, cond, u, u_tb, u_lr, x, y):
+        """
+        Makes the Neumann condition on those boundaries where it is required
+        """
+        u_x = self.derivative(u_lr, x)
+        u_y = self.derivative(u_tb, y)
+
+        if cond[0]==1:
+            u[:self.BC_len] = u_y[:self.BC_len]
+        if cond[1]==1:
+            u[self.BC_len:2*self.BC_len] = u_y[self.BC_len:]
+        if cond[2]==1:
+            u[2*self.BC_len:3*self.BC_len] = u_x[:self.BC_len]
+        if cond[3]==1:
+            u[3*self.BC_len:] = u_x[self.BC_len:]
+
+        return u
+
+    def set_optimizer(self, optimizer_type:str):
+        """
+        Sets the optimizer for Neural Network
+        
+        Types: Adam, LBFGS
+        """
         if optimizer_type=='Adam':
-            return torch.optim.Adam(self.parameters())
+            return torch.optim.Adam(self.model.parameters())
         if optimizer_type=='LBFGS':
-            return torch.optim.LBFGS(self.parameters(),
-                                     lr=15.0, 
-                                     max_iter=50, 
-                                     max_eval=50, 
-                                     history_size=20,
-                                     tolerance_grad=1e-7, 
-                                     tolerance_change=1.0 * np.finfo(float).eps,
+            return torch.optim.LBFGS(self.model.parameters(),
+                                     lr=0.001, 
+                                     max_iter=50000, 
+                                     max_eval=50000, 
+                                     history_size=50,
+                                     tolerance_grad=1e-12, 
+                                     tolerance_change=0.5 * np.finfo(float).eps,
                                      line_search_fn="strong_wolfe")
 
 
-    def PDELoss(self, x, y, t):
-        u = self(x,y,t)
+    def PDELoss(self):
+        """
+        Calculates the loss from PDE
+        """
+        u = self.model([self.X, self.Y, self.T])
         u[:,1] = torch.clamp(u[:,1].clone(), min=0, max=self.cmax-0.0000001)
 
-        p_x = grad(u[:,0], x, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u[:,0]))[0]
-        p_y = grad(u[:,0], y, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u[:,0]))[0]
+        p_x = self.derivative(u[:,0], self.X)
+        p_y = self.derivative(u[:,0], self.Y)
 
         mu = self.mu0 * (1 - u[:,1] / self.cmax).pow(-2.5)
 
         v_x = -self.w**2 * p_x / (12 * mu)
         v_y = -self.w**2 * p_y / (12 * mu)
 
-        c_x = grad(u[:,1]*v_x, x, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u[:,1]*v_x))[0]
-        c_y = grad(u[:,1]*v_y, y, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u[:,1]*v_y))[0]
-        c_t = grad(u[:,1], t, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u[:,1]))[0]
-        
-        p_xx = grad(p_x / mu, x, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(p_x / mu))[0]
-        p_yy = grad(p_y / mu, y, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(p_y / mu))[0]
+        c_x = self.derivative(u[:,1]*v_x, self.X)
+        c_y = self.derivative(u[:,1]*v_y, self.Y)
+        c_t = self.derivative(u[:,1],     self.T)
+
+        p_xx = self.derivative(p_x / mu, self.X)
+        p_yy = self.derivative(p_y / mu, self.Y)
 
         c = c_t + c_x + c_y
         p = p_xx + p_yy
-        
-        # c = c.view(len(c), -1)
-        # p = p.view(len(p), -1)
 
         loss_p = self.criterion(torch.zeros_like(p), p)
         loss_c = self.criterion(torch.zeros_like(c), c)
 
-        loss = loss_p + loss_c
+        loss = self.weights[0] * loss_p + self.weights[1] * loss_c
 
         return loss
     
 
-    def loss_func(self):
-        
-        self.optimizer(self.optim).zero_grad()
-                
-        # Точки коллокации
-        x_collocation = FloatTensor(self.collocation,).uniform_(self.boundaries[0], self.boundaries[1]).to(self.device)
-        y_collocation = FloatTensor(self.collocation,).uniform_(self.boundaries[2], self.boundaries[3]).to(self.device)
-        t_collocation = FloatTensor(self.collocation,).uniform_(self.boundaries[4], self.boundaries[5]).to(self.device)
+    def loss_function(self):
+        """
+        Closure function; calculates all losses (IC, BC, PDE)
+        """
+        self.optimizer.zero_grad()
 
-        x_collocation = Variable(x_collocation, requires_grad=True).to(self.device)
-        y_collocation = Variable(y_collocation, requires_grad=True).to(self.device)
-        t_collocation = Variable(t_collocation, requires_grad=True).to(self.device)
+        # Initial conditions
+        pt_x_IC = Variable(self.IC_x, requires_grad=True).to(self.device)
+        pt_y_IC = Variable(self.IC_y, requires_grad=True).to(self.device)
+        pt_t_IC = Variable(self.IC_t, requires_grad=True).to(self.device)
+        pt_c_IC = Variable(self.IC_c, requires_grad=True).to(self.device).reshape(-1)
 
-        # Начальные условия
+        predictions_IC = self.model([pt_x_IC, pt_y_IC, pt_t_IC])[:,1]
 
-        pt_x_ic = Variable(self.IC_x, requires_grad=True).to(self.device)
-        pt_y_ic = Variable(self.IC_y, requires_grad=True).to(self.device)
-        pt_t_ic = Variable(self.IC_t, requires_grad=True).to(self.device)
+        loss_IC = self.weights[2] * self.criterion(predictions_IC, pt_c_IC)
+        if torch.isnan(loss_IC)==True:
+            raise ValueError("nan value reached")
 
-        pt_p_IC = Variable(self.IC_f[:,0], requires_grad=True).to(self.device)
-        pt_c_IC = Variable(self.IC_f[:,1], requires_grad=True).to(self.device)
+        # Boundary conditions
+        pt_x_tb = Variable(self.x[:2*self.BC_len], requires_grad=True).to(self.device)
+        pt_y_tb = Variable(self.y[:2*self.BC_len], requires_grad=True).to(self.device)
+        pt_t_tb = Variable(self.t[:2*self.BC_len], requires_grad=True).to(self.device)
 
-        predictions_IC = self(pt_x_ic, pt_y_ic, pt_t_ic)
+        pt_x_lr = Variable(self.x[2*self.BC_len:], requires_grad=True).to(self.device)
+        pt_y_lr = Variable(self.y[2*self.BC_len:], requires_grad=True).to(self.device)
+        pt_t_lr = Variable(self.t[2*self.BC_len:], requires_grad=True).to(self.device)
 
-        self.loss_IC = self.criterion(predictions_IC[:,0], pt_p_IC) + self.criterion(predictions_IC[:,1], pt_c_IC)
-        if torch.isnan(self.loss_IC)==True:
-            raise ValueError("Достигнуто значение nan")
+        pt_c = Variable(self.c_f, requires_grad=True).to(self.device)
+        pt_p = Variable(self.p_f, requires_grad=True).to(self.device)
 
-        # ГУ концентрации (Дирихле)
-        pt_c_x = Variable(self.c_BC_x, requires_grad=True).to(self.device)
-        pt_c_y = Variable(self.c_BC_y, requires_grad=True).to(self.device)
-        pt_c_t = Variable(self.c_BC_t, requires_grad=True).to(self.device)
-        pt_c_f = Variable(self.c_BC_f, requires_grad=True).to(self.device)
+        prediction_top_bottom = self.model([pt_x_tb, pt_y_tb, pt_t_tb])
+        prediction_left_right = self.model([pt_x_lr, pt_y_lr, pt_t_lr])
 
-        prediction_c = self(pt_c_x, pt_c_y, pt_c_t)[:,1]
+        prediction_BC = torch.cat((prediction_top_bottom,prediction_left_right))
 
-        # ГУ давления (Нейман)
-        pt_p_x = Variable(self.p_BC_x, requires_grad=True).to(self.device)
-        pt_p_y = Variable(self.p_BC_y, requires_grad=True).to(self.device)
-        pt_p_t = Variable(self.p_BC_t, requires_grad=True).to(self.device)
-        pt_p_f = Variable(self.p_BC_f, requires_grad=True).to(self.device)
+        prediction_p = self.check_BC(self.p_cond[1], prediction_BC[:,0], prediction_top_bottom[:,0], prediction_left_right[:,0], pt_x_lr, pt_y_tb)
+        prediction_c = self.check_BC(self.c_cond[1], prediction_BC[:,1], prediction_top_bottom[:,1], prediction_left_right[:,1], pt_x_lr, pt_y_tb)
 
-        prediction_p = self(pt_p_x, pt_p_y, pt_p_t)[:,0]
-        prediction_p = grad(prediction_p, pt_p_x, create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(prediction_p))[0]
+        loss_BC = self.weights[3] * (self.criterion(pt_p, prediction_p) + self.criterion(pt_c, prediction_c))
+        if torch.isnan(loss_BC)==True:
+            raise ValueError("nan value reached")
 
-        self.loss_BC = self.criterion(pt_c_f, prediction_c) + self.criterion(pt_p_f,prediction_p)
-        if torch.isnan(self.loss_BC)==True:
-            raise ValueError("Достигнуто значение nan")
+        # PDE
+        loss_PDE = self.PDELoss()
+        if torch.isnan(loss_PDE)==True:
+            raise ValueError("nan value reached")
 
-        # PDE loss
-        self.loss_PDE = self.PDELoss(x_collocation, y_collocation, t_collocation)
-        if torch.isnan(self.loss_PDE)==True:
-            raise ValueError("Достигнуто значение nan")
-
-        loss = self.weights[0] * self.loss_PDE + self.weights[1] * self.loss_IC + self.weights[2] * self.loss_BC
-        # self.losses.append(loss.item())
+        loss = loss_PDE + loss_IC + loss_BC
         loss.backward()
+        
+        self.losses.append(loss.item())
+        
+        if self.CL==False:
+            if self.epoch % 10 == 0:
+                self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
+                                        f'{loss_PDE}\t','|',
+                                        f'{loss_IC}\t','|',
+                                        f'{loss_BC}\t','|',
+                                        f'{self.losses[-1]}\t','|']])
+                print(self.print_tab.draw())
+        else:
+            if self.epoch % 10 == 0:
+                self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
+                                        f'{loss_PDE}\t','|',
+                                        f'{loss_IC}\t','|',
+                                        f'{loss_BC}\t','|',
+                                        f'{self.losses[-1]}\t','|',
+                                        f'{self.const}\t','|']])
+                print(self.print_tab.draw())
+        self.epoch += 1
+
         return loss
 
 
-    def train(self, epochs, max_loss):
+    def train(self):
+        """
+        The main function of Net training
+        """
         self.print_tab.set_deco(Texttable.HEADER)
         self.print_tab.set_cols_width([1,15,1,25,1,25,1,25,1,25,1])
         self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|']])
         print(self.print_tab.draw())
+        self.model.train()
+
+        self.optimizer = self.set_optimizer('Adam')
+
+        if self.epoch <= self.Adam_epochs+1:
+            for _ in range(self.epoch, self.Adam_epochs+1):
+                self.optimizer.step(self.loss_function)
         
-        optimizer = self.optimizer(self.optim)
-        
-        for epoch in range(epochs+1):
-            self.epoch = epoch
-            if self.epoch % 1 == 0:
-                self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
-                                    f'{self.weights[0] * self.loss_PDE}\t','|',
-                                    f'{self.weights[1] * self.loss_IC}\t','|',
-                                    f'{self.weights[2] * self.loss_BC}\t','|',
-                                    f'{self.losses[-1]}\t','|']])
-                print(self.print_tab.draw())
-            g = optimizer.step(self.loss_func)
-            self.losses.append(g.item())
-            if self.losses[-1] < max_loss:
-                break
+        self.optimizer = self.set_optimizer('LBFGS')
+        self.optimizer.step(self.loss_function)
 
     
+    def CL_train(self, constants:dict):
+        """
+        Function for Cirriculum Learning for Net
+        
+        So far only for flow rates
+        """
+        self.print_tab.set_deco(Texttable.HEADER)
+        self.print_tab.set_cols_width([1,15,1,25,1,25,1,25,1,25,1,15,1])
+        self.model.train()
+        self.CL=True
+
+        if constants.get("v_in")!=None:
+            os.mkdir(f'data/CL_v_in,{constants["v_in"]}')
+            self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|','v_x','|']])
+            print(self.print_tab.draw())
+            for param in constants["v_in"]:
+                self.v_in = param
+                self.const = param
+                self.makeIBC()
+
+                self.epoch=0
+                self.optimizer = self.set_optimizer('Adam')
+                if self.epoch <= self.Adam_epochs+1:
+                    for _ in range(self.epoch, self.Adam_epochs+1):
+                        self.optimizer.step(self.loss_function)
+                
+                self.optimizer = self.set_optimizer('LBFGS')
+                self.optimizer.step(self.loss_function)
+
+                self.full_save(f'data/CL_v_in,{constants["v_in"]}/{param}', f'data/CL_v_in,{constants["v_in"]}/{param}_data')
+        self.CL=False
+    
+
+    def eval_(self):
+        self.model.eval()
