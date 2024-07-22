@@ -11,7 +11,8 @@ def plot_results(x_min:np.float64,
                  t:np.float64,
                  net,
                  Nx:int,
-                 Ny:int)->list:
+                 Ny:int,
+                 clims:list=None)->list:
   """
   Plots data from Neural Network
 
@@ -33,7 +34,9 @@ def plot_results(x_min:np.float64,
     Number of points on the x axis
   Ny : int
     Number of points on the x axis
-
+  clims : list
+    Array of limits for colourbars
+    
   Returns
   -------
   data : list
@@ -69,19 +72,19 @@ def plot_results(x_min:np.float64,
                   gridspec_kw={"width_ratios":[1,1,0.05]})
   fig.subplots_adjust(wspace=0.6)
 
-  k = 0
   for i in range(2):
       for j in range(2):
-        im = axes[i,j].pcolormesh(mesh_x, mesh_y, data[k], cmap='jet')
+        im = axes[i,j].pcolormesh(mesh_x, mesh_y, data[2*i+j], cmap='jet')
         axes[i,j].set_xticks(np.arange(x_min, x_max+dx/2, 0.2))
         axes[i,j].set_yticks(np.arange(y_min, y_max+dy/2, 0.2))
         axes[i,j].set_title(f"t={period[j]}")
         axes[i,j].set_aspect('equal', 'box')
         images.append(im)
-        k += 1
+        if clims==None:
+          images[-1].set_clim(np.min((data[2*i], data[2*i+1])), np.max((data[2*i], data[2*i+1])))
+        else:
+          images[-1].set_clim(clims[2*i],clims[2*i+1])
       fig.colorbar(im, cax=axes[i,j+1])
-      images[k-2].set_clim(np.min((data[k-1], data[k-2])), np.max((data[k-1], data[k-2])))
-      images[k-1].set_clim(np.min((data[k-1], data[k-2])), np.max((data[k-1], data[k-2])))
   fig.tight_layout()
   plt.show()
 
@@ -156,7 +159,7 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
   plt.title('Left')
 
   plt.subplot(224)
-  if BC_types[0]==1:
+  if BC_types[3]==1:
     plt.plot(y, (data[:,-1] - data[:,-2]) / dx, c='black')
   else:
     plt.plot(y, data[:,-1], c='black')

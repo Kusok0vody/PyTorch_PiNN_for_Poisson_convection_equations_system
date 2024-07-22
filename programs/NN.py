@@ -89,18 +89,18 @@ class Net(nn.Module):
         return dx
     
 
-    def load(self, path:str):
+    def load_model(self, path:str):
         """
         Loads NN from file
         """
-        self.model.load_state_dict(torch.load(path))
+        self.load_state_dict(torch.load(path))
 
 
-    def save(self, path:str):
+    def save_model(self, path:str):
         """
         Saves NN to file
         """
-        torch.save(self.model.state_dict(), path)
+        torch.save(self.state_dict(), path)
     
 
 class Poisson:
@@ -119,9 +119,9 @@ class Poisson:
         self.Adam_epochs = 5000
         self.losses=[]
         self.epoch = 0
-        self.BC_len = ranges[0].shape[0]
-        self.zeros = np.zeros(self.BC_len)
-        self.ones = np.ones(self.BC_len)
+        self.cond_points = ranges[0].shape[0]
+        self.zeros = torch.zeros(self.cond_points)
+        self.ones = torch.ones(self.cond_points)
         self.print_tab = Texttable()
         self.criterion = torch.nn.MSELoss()
         self.weights = [1,1,1]
@@ -180,13 +180,13 @@ class Poisson:
         u_y = self.model.derivative(u_tb, y)
 
         if cond[0]==1:
-            u[:self.BC_len] = u_y[:self.BC_len]
+            u[:self.cond_points] = u_y[:self.cond_points]
         if cond[1]==1:
-            u[self.BC_len:2*self.BC_len] = u_y[self.BC_len:]
+            u[self.cond_points:2*self.cond_points] = u_y[self.cond_points:]
         if cond[2]==1:
-            u[2*self.BC_len:3*self.BC_len] = u_x[:self.BC_len]
+            u[2*self.cond_points:3*self.cond_points] = u_x[:self.cond_points]
         if cond[3]==1:
-            u[3*self.BC_len:] = u_x[self.BC_len:]
+            u[3*self.cond_points:] = u_x[self.cond_points:]
 
         return u
 
@@ -217,11 +217,11 @@ class Poisson:
         self.optimizer.zero_grad()
 
         # Boundary conditions
-        pt_x_tb = Variable(self.x[:2*self.BC_len], requires_grad=True).to(self.device)
-        pt_y_tb = Variable(self.y[:2*self.BC_len], requires_grad=True).to(self.device)
+        pt_x_tb = Variable(self.x[:2*self.cond_points], requires_grad=True).to(self.device)
+        pt_y_tb = Variable(self.y[:2*self.cond_points], requires_grad=True).to(self.device)
 
-        pt_x_lr = Variable(self.x[2*self.BC_len:], requires_grad=True).to(self.device)
-        pt_y_lr = Variable(self.y[2*self.BC_len:], requires_grad=True).to(self.device)
+        pt_x_lr = Variable(self.x[2*self.cond_points:], requires_grad=True).to(self.device)
+        pt_y_lr = Variable(self.y[2*self.cond_points:], requires_grad=True).to(self.device)
 
         pt_p = Variable(self.f, requires_grad=True).to(self.device)
 
@@ -276,6 +276,7 @@ class Poisson:
         self.optimizer = self.model.set_optimizer('LBFGS')
         self.optimizer.step(self.loss_function)
 
+
 class Poisson_Convection:
     def __init__(self,
                  w:np.float64,
@@ -287,7 +288,7 @@ class Poisson_Convection:
                  c_cond:list,
                  p_cond:list,
                  collocation:int,
-                 ranges:list):
+                 cond_points:int):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.model = Net(input_size=3,
@@ -297,13 +298,13 @@ class Poisson_Convection:
                          act=Sin).to(self.device)
         
         # Technical Variables
-        self.Adam_epochs = 5000
+        self.Adam_epochs = 10000
         self.losses=[]
         self.epoch = 0
         self.const = 0
-        self.BC_len = ranges[0].shape[0]
-        self.zeros = np.zeros(self.BC_len)
-        self.ones = np.ones(self.BC_len)
+        self.cond_points = cond_points
+        self.zeros = torch.Tensor([0]).to(self.device)
+        self.ones = torch.Tensor([1]).to(self.device)
         self.print_tab = Texttable()
         self.criterion = torch.nn.MSELoss()
         self.weights = [1,1,1,1]
@@ -318,7 +319,6 @@ class Poisson_Convection:
         self.v_in = v_in
         self.chi = chi
         self.size = size
-        self.ranges = ranges
         self.c_cond = c_cond
         self.p_cond = p_cond
         self.makeIBC()
@@ -356,33 +356,47 @@ class Poisson_Convection:
         """
         Makes initial and boundary conditions
         """
-        self.IC_x = torch.linspace(self.size[0], self.size[1], int(self.BC_len/1000)).to(self.device)
-        self.IC_y = torch.linspace(self.size[2], self.size[3], int(self.BC_len/1000)).to(self.device)
-        self.IC_t = torch.zeros(int(self.BC_len/1000)).to(self.device)
 
-        IC_XYT = torch.stack(torch.meshgrid(self.IC_x, self.IC_y, self.IC_t)).reshape(3, -1).T
+        x = torch.linspace(self.size[0], self.size[1], self.cond_points).to(self.device)
+        y = torch.linspace(self.size[2], self.size[3], self.cond_points).to(self.device)
+        t = torch.linspace(self.size[4], self.size[5], self.cond_points).to(self.device)
+        XYT = torch.stack(torch.meshgrid(x, y, t)).reshape(3, -1).T
 
-        self.IC_x = Variable(IC_XYT[:,0], requires_grad=True).to(self.device)
-        self.IC_y = Variable(IC_XYT[:,1], requires_grad=True).to(self.device)
-        self.IC_t = Variable(IC_XYT[:,2], requires_grad=True).to(self.device)
-
-        c_initial = torch.zeros(self.IC_x.shape).to(self.device)
-        # for i in range(len(self.IC_x)):
-        #     if self.IC_x[i]==1 and torch.abs(self.IC_y[i] - torch.max(self.IC_y) / 2) <= self.chi / 2:
-        #         c_initial[i] = np.max(self.c_cond[0][3]) 
-        self.IC_c = c_initial
+        self.IC_x = XYT[:,0]
+        self.IC_y = XYT[:,1]
+        self.t = XYT[:,2]
+        self.IC_t = torch.zeros_like(XYT[:,2]).to(self.device)
+        self.IC_c = torch.zeros_like(self.IC_t).to(self.device)
+        
+        x = torch.linspace(self.size[0], self.size[1], self.cond_points**2).to(self.device)
+        y = torch.linspace(self.size[2], self.size[3], self.cond_points**2).to(self.device)
+        t = torch.linspace(self.size[4]+0.001, self.size[5], self.cond_points).to(self.device)
+        psi = torch.where(torch.abs(y - torch.max(y) / 2) <= self.chi / 2, 1 / self.chi, 0)
+        psi = torch.stack(torch.meshgrid(psi, torch.Tensor([0 for _ in range(32)]).to(self.device))).reshape(2, -1).T[:,0]
 
         # BC for c
-        c_condition = cnd.form_boundaries(self.ranges, self.c_cond[0], self.ones, self.zeros)
+        for i in range(len(self.c_cond[0])):
+            if self.c_cond[2][i]:
+                self.c_cond[0][i] = self.c_cond[0][i] * psi
+            else:
+                self.c_cond[0][i] = self.c_cond[0][i] * torch.ones_like(self.IC_x)
+
+        c_condition = cnd.form_boundaries([x, y, t], self.c_cond[0], self.ones, self.zeros)
         self.c_f, XYT = cnd.form_condition_arrays(c_condition)
+
+        # BC for p
+        for i in range(len(self.p_cond[0])):
+            if self.p_cond[2][i]:
+                self.p_cond[0][i] = self.p_cond[0][i] * psi
+            else:
+                self.p_cond[0][i] = self.p_cond[0][i] * torch.ones_like(self.IC_x)
+
+        p_condition = cnd.form_boundaries([x, y, t], self.p_cond[0], self.ones, self.zeros)
+        self.p_f, _ = cnd.form_condition_arrays(p_condition)
+
         self.x = XYT[0]
         self.y = XYT[1]
         self.t = XYT[2]
-
-        # BC for p
-        p_condition = cnd.form_boundaries(self.ranges, self.p_cond[0], self.ones, self.zeros)
-        self.p_f, _ = cnd.form_condition_arrays(p_condition)
-
 
     def check_BC(self, cond, u, u_tb, u_lr, x, y):
         """
@@ -392,13 +406,13 @@ class Poisson_Convection:
         u_y = self.model.derivative(u_tb, y)
 
         if cond[0]==1:
-            u[:self.BC_len] = u_y[:self.BC_len]
+            u[:self.cond_points**3] = u_y[:self.cond_points**3]
         if cond[1]==1:
-            u[self.BC_len:2*self.BC_len] = u_y[self.BC_len:]
+            u[self.cond_points**3:2*self.cond_points**3] = u_y[self.cond_points**3:]
         if cond[2]==1:
-            u[2*self.BC_len:3*self.BC_len] = u_x[:self.BC_len]
+            u[2*self.cond_points**3:3*self.cond_points**3] = u_x[:self.cond_points**3]
         if cond[3]==1:
-            u[3*self.BC_len:] = u_x[self.BC_len:]
+            u[3*self.cond_points**3:] = u_x[self.cond_points**3:]
 
         return u
 
@@ -455,13 +469,13 @@ class Poisson_Convection:
             raise ValueError("nan value reached")
 
         # Boundary conditions
-        pt_x_tb = Variable(self.x[:2*self.BC_len], requires_grad=True).to(self.device)
-        pt_y_tb = Variable(self.y[:2*self.BC_len], requires_grad=True).to(self.device)
-        pt_t_tb = Variable(self.t[:2*self.BC_len], requires_grad=True).to(self.device)
+        pt_x_tb = Variable(self.x[:2*self.cond_points**3], requires_grad=True).to(self.device)
+        pt_y_tb = Variable(self.y[:2*self.cond_points**3], requires_grad=True).to(self.device)
+        pt_t_tb = Variable(self.t[:2*self.cond_points**3], requires_grad=True).to(self.device)
 
-        pt_x_lr = Variable(self.x[2*self.BC_len:], requires_grad=True).to(self.device)
-        pt_y_lr = Variable(self.y[2*self.BC_len:], requires_grad=True).to(self.device)
-        pt_t_lr = Variable(self.t[2*self.BC_len:], requires_grad=True).to(self.device)
+        pt_x_lr = Variable(self.x[2*self.cond_points**3:], requires_grad=True).to(self.device)
+        pt_y_lr = Variable(self.y[2*self.cond_points**3:], requires_grad=True).to(self.device)
+        pt_t_lr = Variable(self.t[2*self.cond_points**3:], requires_grad=True).to(self.device)
 
         pt_c = Variable(self.c_f, requires_grad=True).to(self.device)
         pt_p = Variable(self.p_f, requires_grad=True).to(self.device)
