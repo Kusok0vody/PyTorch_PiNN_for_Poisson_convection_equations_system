@@ -1,7 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 from torch.autograd import Variable
 import torch
+import os
 
 
 def plot_results(x_min:np.float64,
@@ -63,7 +65,7 @@ def plot_results(x_min:np.float64,
   for i in range(len(f)):
       ti = torch.full(x.shape, np.float64(period[f[i][0]]))
       pt_t = Variable(ti, requires_grad=True).cuda()
-      pt_u = net([pt_x, pt_y, pt_t])[:,f[i][1]]
+      pt_u = net.model([pt_x, pt_y, pt_t])[:,f[i][1]]
       u = pt_u.data.cpu().numpy()
       mesh_u = u.reshape(mesh_x.shape)
       data.append(mesh_u)
@@ -133,7 +135,7 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
 
   plt.subplot(221)
   if BC_types[0]==1:
-    plt.plot(x, (data[0] - data[1]) / dy, c='black')
+    plt.plot(x, (data[-1] - data[-2]) / dy, c='black')
   else:
     plt.plot(x, data[0], c='black')
   plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
@@ -142,7 +144,7 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
 
   plt.subplot(222)
   if BC_types[1]==1:
-    plt.plot(x, (data[-1] - data[-2])/ dy, c='black')
+    plt.plot(x, (data[0] - data[1])/ dy, c='black')
   else:
     plt.plot(x, data[-1], c='black')
   plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
@@ -167,8 +169,109 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
   plt.grid()
   plt.title('Right')
 
+
 def plot_loss(loss):
   plt.semilogy(loss, c='black')
   plt.title('Loss')
   plt.xlabel('iterations')
   plt.grid()
+
+
+def anim_result(data,
+                steps,
+                clims=None,
+                path:str=None,
+                name:str=None,
+                colour:str='viridis',
+                savetogif:bool=False,
+                showMe:bool=False,
+                ):
+    plt.rc('text', usetex=True)
+    # animate function for animation.FuncAnimation
+    def animate(i):
+        # change "slice" of data cube
+        line.set_array(data[i])
+        a = ax.set_title(r'$p(x,y,t)$'+ f' at t = {np.round(i*steps,3)}')
+        return line, a
+    
+    # shapes
+    size_t = data.shape[0]
+    size_x = data[0].shape[1]
+    size_y = data[0].shape[0]
+
+    # making first plot
+    fig, ax = plt.subplots()
+    plt.gca().invert_yaxis()
+    
+    # first slice of data
+    line = plt.imshow(data[0], cmap = colour, extent = [0, 1, 0, 1], interpolation='none')
+    plt.colorbar(line, ax=ax)
+    if clims!=None:
+      plt.clim(clims[0],clims[1])
+    #plt.clim(np.min(data), np.max(data))
+    
+    ax.set_xlabel('x, m')
+    ax.set_ylabel('y, m')
+
+    ax.set_title(r'$p(x,y,t)$'+ ' at t = 0')
+
+    # animate
+    ani = animation.FuncAnimation(fig, animate, interval=30, frames = size_t)
+
+    # show animation
+    if showMe == True:
+        plt.show()
+
+    # save to .gif with all specifies
+    if savetogif == True:
+        if name == None:
+            if path==None:
+                if os.path.exists(f"t={size_t}, max_x={size_x}, max_y={size_y}.gif")==True:
+                    k = 1
+                    while os.path.exists(f"t={size_t}, max_x={size_x}, max_y={size_y}_{k}.gif")==True:
+                        k += 1                    
+                    writer = animation.PillowWriter(
+                        fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"t={size_t}, max_x={size_x}, max_y={size_y}_{k}.gif", writer=writer)
+                else:
+                    writer = animation.PillowWriter(
+                    fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"t={size_t}, max_x={size_x}, max_y={size_y}.gif", writer=writer)
+            else:
+                if os.path.exists(f"{path}/t={size_t}, max_x={size_x}, max_y={size_y}.gif")==True:
+                    k = 1
+                    while os.path.exists(f"{path}/t={size_t}, max_x={size_x}, max_y={size_y}_{k}.gif")==True:
+                        k += 1                    
+                    writer = animation.PillowWriter(
+                        fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{path}/t={size_t}, max_x={size_x}, max_y={size_y}_{k}.gif", writer=writer)
+                else:
+                    writer = animation.PillowWriter(
+                    fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{path}/t={size_t}, max_x={size_x}, max_y={size_y}.gif", writer=writer)
+        else:
+            if path==None:
+                if os.path.exists(f"{name}.gif")==True:
+                    k = 1
+                    while os.path.exists(f"{name}_{k}.gif")==True:
+                        k += 1                    
+                    writer = animation.PillowWriter(
+                        fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{name}_{k}.gif", writer=writer)
+                else:
+                    writer = animation.PillowWriter(
+                    fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{name}.gif", writer=writer)
+            else:
+                if os.path.exists(f"{path}/{name}.gif")==True:
+                    k = 1
+                    while os.path.exists(f"{path}/{name}_{k}.gif")==True:
+                        k += 1                    
+                    writer = animation.PillowWriter(
+                        fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{path}/{name}_{k}.gif", writer=writer)
+                else:
+                    writer = animation.PillowWriter(
+                    fps=120, metadata=dict(artist='Doofenshmirtz Evil Incorporated'), bitrate=1800)
+                    ani.save(f"{path}/{name}.gif", writer=writer)
+    plt.rc('text', usetex=False)
