@@ -1,7 +1,6 @@
-from numpy import vstack, concatenate, sin, cos, sinh, cosh, power, pi
-from torch import device as d, cuda, FloatTensor
+from numpy import sin, cos, sinh, cosh, power, pi
+from torch import device as d, cuda
 device = d("cuda:0" if cuda.is_available() else "cpu")
-import numpy as np
 import torch
 
 def form_condiition(ranges:list, arr):
@@ -43,6 +42,18 @@ def form_condition_arrays(BC_arr):
         X.append(BC_arr[:,i])
     
     return f, X
+
+
+def formBC_coords(raw_x, raw_y, raw_t):
+    top = torch.stack(torch.meshgrid((raw_x, torch.ones_like(raw_y), raw_t))).reshape(3, -1).T
+    bottom = torch.stack(torch.meshgrid((raw_x, torch.zeros_like(raw_y), raw_t))).reshape(3, -1).T
+    left = torch.stack(torch.meshgrid((torch.zeros_like(raw_y), raw_y, raw_t))).reshape(3, -1).T
+    right = torch.stack(torch.meshgrid((torch.ones_like(raw_y), raw_y, raw_t))).reshape(3, -1).T
+    all = torch.vstack([top, bottom, left, right])
+    x = all[:,0]
+    y = all[:,1]
+    t = all[:,2]
+    return x, y, t
 
 
 def Poisson_analytical(mu, Q0, w, x, y, chi, H, L, K):
