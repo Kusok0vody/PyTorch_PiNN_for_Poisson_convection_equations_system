@@ -26,11 +26,11 @@ net = NN.Poisson_Convection(w=1., mu0=0.1, cmax=1, v_in=-1, c_in=0.5, chi=0.2,
 
 
 
-net.full_load("data\CL_w,[1, 0.694, 0.51, 0.39, 0.308, 0.25, 0.207, 0.173, 0.148, 0.128, 0.111]/0.25",
-              "data\CL_w,[1, 0.694, 0.51, 0.39, 0.308, 0.25, 0.207, 0.173, 0.148, 0.128, 0.111]/0.25_data.npy")
+# net.full_load("data\CL_w,[1, 0.694, 0.51, 0.39, 0.308, 0.25, 0.207, 0.173, 0.148, 0.128, 0.111]/0.25",
+            #   "data\CL_w,[1, 0.694, 0.51, 0.39, 0.308, 0.25, 0.207, 0.173, 0.148, 0.128, 0.111]/0.25_data.npy")
 # net.full_load("data\CL_w,[0.0318, 0.025, 0.02, 0.015, 0.01]/0.0318",
             #   "data\CL_w,[0.0318, 0.025, 0.02, 0.015, 0.01]/0.0318_data.npy")
-# net.full_load("data/ttt/0.25","data/ttt/0.25_data.npy")
+net.full_load("tty","ttyd.npy")
 net.model.eval()
 outputs = vis.plot_results(0, 1, 0, 1, 2, net, Nx, Ny)#,clims=[0.4,0.7,0,1])
 

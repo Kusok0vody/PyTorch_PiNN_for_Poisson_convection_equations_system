@@ -163,3 +163,5 @@ cython_debug/
 data/wtf4
 data/wtf4d.npy
 /solve
+/gifs
+/data
