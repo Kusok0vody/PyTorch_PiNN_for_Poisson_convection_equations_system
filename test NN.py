@@ -12,7 +12,6 @@ np.random.seed(1234)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
-
 Nx = 100
 Ny = 100
 x = np.linspace(0, 1, Nx)
