@@ -1,9 +1,12 @@
 import numpy as np 
 import torch
 import torch.nn as nn
+import programs.misc as misc
 
 from torch.autograd import grad
 from collections import OrderedDict
+
+torch.manual_seed(1234)
 
 
 class Sin(nn.Module):
@@ -14,9 +17,26 @@ class Sin(nn.Module):
         super().__init__()
 
     def forward(self, input):
-        sin = torch.sin(input)
-        return sin
+        return torch.sin(input)
     
+
+class Wave(nn.Module):
+    """
+    sin+cos activation function for Neural Network
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.cos(input) + torch.sin(input)
+
+
+class OutputHook(list):
+    """ Hook to capture module outputs.
+    """
+    def __call__(self, module, input, output):
+        self.append(output)
+
 
 class Net(nn.Module):
     """
@@ -25,7 +45,7 @@ class Net(nn.Module):
     def __init__(
         self,
         input_size:int,
-        neurons_arr:list[int],
+        neurons_arr:list,
         output_size:int,
         depth:int,
         act,):
@@ -43,14 +63,25 @@ class Net(nn.Module):
 
         layerDict = OrderedDict(layers)
         self.layers = torch.nn.Sequential(layerDict)
+        self.sin = Sin()
 
-
-    def forward(self, inputs:list):
-        inputs_united = inputs[0].reshape(-1, 1)
-        for i in range(1, len(inputs)):
-            inputs_united = torch.cat([inputs_united, inputs[i].reshape(-1, 1)], axis=1)
+    def forward(self, inputs: list, transform_func=None):
+        """
+        Forward pass through the network.
+        Concatenates the input tensors and feeds them through the layers.
+        """
+        inputs_united = torch.cat([input_tensor.reshape(-1, 1) for input_tensor in inputs], axis=1)
         outputs = self.layers(inputs_united)
+        if transform_func!=None:
+            transform_func(outputs)
         return outputs
+        
+    
+    @staticmethod
+    def init_weights(m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            m.bias.data.fill_(0.01)
 
 
     def set_optimizer(self, optimizer_type:str):
@@ -65,10 +96,10 @@ class Net(nn.Module):
             return torch.optim.NAdam(self.parameters(), weight_decay=1e-5)
         if optimizer_type=='LBFGS':
             return torch.optim.LBFGS(self.parameters(),
-                                     lr=0.001, 
+                                     # lr=0.1, 
                                      max_iter=50000, 
                                      max_eval=50000, 
-                                     history_size=50,
+                                     history_size=150,
                                      tolerance_grad=1e-12, 
                                      tolerance_change=0.5 * np.finfo(float).eps,
                                      line_search_fn="strong_wolfe")

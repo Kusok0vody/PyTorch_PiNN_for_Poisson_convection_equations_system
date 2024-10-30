@@ -199,3 +199,7 @@ class Poisson:
         
         self.optimizer = self.model.set_optimizer('LBFGS')
         self.optimizer.step(self.loss_function)
+
+
+    def eval_(self):
+        self.model.eval()

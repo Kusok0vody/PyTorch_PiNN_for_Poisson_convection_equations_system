@@ -4,7 +4,7 @@ import matplotlib.animation as animation
 import os
 
 def plot_results(data,
-                 limits:list[np.float64],
+                 limits:list,
                  t:np.float64,
                  Nx:int,
                  Ny:int,
@@ -151,9 +151,10 @@ def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.fl
 
 
 def plot_loss(loss):
-  plt.semilogy(loss, c='black')
+  plt.semilogy(loss, c='black', label=loss[-1])
   plt.title('Loss')
   plt.xlabel('Iterations')
+  plt.legend()
   plt.grid()
 
 
@@ -170,7 +171,6 @@ def anim_result(data,
                 ):
 
     def animate(i):   
-        line.set_array(data[i])
         if title == False:
           title_ = ax.set_title('f(x,y,t)' + f' at t = {np.round(i*steps,3)}')
         else:
@@ -184,6 +184,7 @@ def anim_result(data,
                               linewidth=1,
                               color='lightgrey',
                               density=[1,0.8])
+        line.set_array(data[i])
         return line, title_, strm
     
     size_t = data.shape[0]
@@ -191,15 +192,11 @@ def anim_result(data,
     size_y = data[0].shape[0]
 
     fig, ax = plt.subplots()
+    fig.dpi = 150
     ax1 = ax.twinx()
     ax1.axis('off')
     plt.gca().invert_yaxis()
 
-    line = ax.imshow(data[0], cmap = colour, extent = [0, 1, 0, 1], interpolation='none')
-    plt.colorbar(line, ax=ax)
-    if clims!=False:
-      line.set_clim(clims[0],clims[1])
-    
     if streamplot_data!=False:
        strm = ax1.streamplot(streamplot_data[0],
                              streamplot_data[1],
@@ -208,10 +205,15 @@ def anim_result(data,
                              linewidth=1,
                              color='lightgrey',
                              density=[1,0.8])
-       
+
+    line = ax.imshow(data[0], cmap = colour, extent = [0, 1, 0, 1], interpolation='none')
+    plt.colorbar(line, ax=ax)
+    if clims!=False:
+      line.set_clim(clims[0],clims[1])
+
     ax.set_xlabel('x, m')
     ax.set_ylabel('y, m')
-    
+
     if title == False:
        ax.set_title('f(x,y,t)'+ ' at t = 0')
     else:

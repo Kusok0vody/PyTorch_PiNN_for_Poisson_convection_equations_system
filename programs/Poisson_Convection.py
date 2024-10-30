@@ -1,75 +1,103 @@
 import numpy as np 
 import os
 import torch
+import time
 
 from torch.autograd import Variable
 from texttable import Texttable
-from copy import deepcopy
+from copy import deepcopy, copy
 
 import programs.conditions as cnd
+import programs.misc as misc
 from programs.NN import *
 
 
 class Poisson_Convection:
     def __init__(self,
-                 w:np.float64,
-                 mu0:np.float64,
-                 cmax:np.float64,
-                 v_in:np.float64,
-                 c_in:np.float64,
-                 chi:np.float64,
-                 size:list,
-                 c_cond:list,
-                 p_cond:list,
-                 collocation:int,
-                 cond_points:int):
+                 w: np.float64,
+                 mu0: np.float64,
+                 cmax: np.float64,
+                 v_in: np.float64,
+                 c1: np.float64,
+                 chi: np.float64,
+                 size: list,
+                 c_cond: list,
+                 p_cond: list,
+                 PDE_points: int,
+                 BC_points: int,
+                 IC_points: int,
+                 c2: np.float64 = None,
+                 beta: np.float64 = -2.5,
+                 t1: int = None):
+
+        # CPU/GPU
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        torch.set_default_device(self.device)
 
-        self.model = Net(input_size=3,
-                         neurons_arr=[32,16,16,8,8],
-                         output_size=2,
-                         depth=4,
-                         act=Sin).to(self.device)
+        # Дебаг для производной
+        torch.autograd.set_detect_anomaly(False)
         
-        # Technical Variables
-        self.Adam_epochs = 10000
-        self.losses=[]
-        self.epoch = 0
-        self.const = 0
-        self.cond_points = cond_points
-        self.cond_p = self.cond_points**3
-        self.zeros = torch.Tensor([0]).to(self.device)
-        self.ones = torch.Tensor([1]).to(self.device)
-        self.print_tab = Texttable()
+        # Создание модели
+        self.model = Net(input_size=3,
+                         neurons_arr=[48,48,48,48,48],
+                         output_size=3,
+                         depth=4,
+                         act=Sin)
+
+        # Итерационные переменные
+        self.Adam_epochs = 2000
+        self.losses      = []
+        self.epoch       = 0
+        self.k           = 10
+
+        # Переменные числа точек
+        self.PDE_points = PDE_points
+        self.BC_points  = BC_points
+        self.BC_points2 = self.BC_points**2
+        self.IC_points  = IC_points
+        
+        # Вспомогаительные тензоры 0 и 1
+        self.zeros = torch.FloatTensor([0]).to(self.device)
+        self.ones  = torch.FloatTensor([1]).to(self.device)
+
+        # Параметры для обучения
         self.criterion = torch.nn.MSELoss()
-        self.weights = [1,1,1,1]
-        self.CL_epochs = []
-        self.CL = False
+        self.weights   = [1,1,1,1,1,1]
         self.optimizer = self.model.set_optimizer('Adam')
-        self.collocation = collocation
 
-        self.PDE = []
-        self.BC = []
-        self.IC = []
-
-        # Constants and conditions
-        self.w = w
-        self.mu0 = mu0
+        # Параметры для Cirriculum Learning
+        self.CL_epochs = []
+        self.CL        = False
+        self.const     = 0
+        
+        # Физические Константты
+        self.w    = w
+        self.mu0  = mu0
+        self.beta = beta
         self.cmax = cmax
         self.v_in = v_in
-        self.c_in = c_in
-        self.chi = chi
-        self.size = deepcopy(size)
+        self.c1   = c1
+        self.c2   = c2
+        self.t1   = t1
+
+        # Граничные условия
         self.c_cond = deepcopy(c_cond)
         self.p_cond = deepcopy(p_cond)
+        
+        # Геометрия
+        self.chi  = chi
+        self.size = deepcopy(size)
+        self.a    = (self.size[3] - self.chi)/2
+        self.b    = (self.size[3] + self.chi)/2
 
+        # Создание массивов ГУ и НУ
         self.makeIBC()
 
     def full_load(self, path_nn:str, path_data:str):
         """
         Loads NN and other parameters (temporarily only losses) from file
         """
-        self.model.load_state_dict(torch.load(path_nn))
+        self.model.load_state_dict(torch.load(path_nn,map_location=torch.device('cpu')))
         data = np.load(path_data)
         self.losses = data[0].tolist()
 
@@ -87,182 +115,229 @@ class Poisson_Convection:
         """
         Makes initial and boundary conditions
         """
-        x = torch.linspace(self.size[0]+0.01, self.size[1]-0.01, self.cond_points).to(self.device)
-        y = torch.linspace(self.size[2]+0.01, self.size[3]-0.01, self.cond_points).to(self.device)
-        t = torch.linspace(self.size[4], self.size[5], self.cond_points).to(self.device)
-        XYT = torch.stack(torch.meshgrid(x, y, t)).reshape(3, -1).T
+        # Создание массивов для начального условия
+        x = torch.linspace(self.size[0], self.size[1], self.IC_points)
+        y = torch.linspace(self.size[2], self.size[3], self.IC_points)
+        # x = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-2).to(self.device).uniform_(self.size[2], self.size[3]), self.ones))
+        # y = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-2).to(self.device).uniform_(self.size[4], self.size[5]), self.ones))
+    
+        XYT = torch.stack(torch.meshgrid(x, y, self.zeros, indexing='ij')).reshape(3, -1)
+        self.x_IC = Variable(XYT[0], requires_grad=True)
+        self.y_IC = Variable(XYT[1], requires_grad=True)
+        self.t_IC = Variable(XYT[2], requires_grad=True)
+        self.c_IC = torch.zeros_like(self.t_IC)
 
-        self.IC_x = XYT[:,0]
-        self.IC_y = XYT[:,1]
-        self.t = XYT[:,2]
-        self.IC_t = torch.zeros_like(XYT[:,2]).to(self.device)
-        self.IC_c = torch.zeros_like(self.IC_t).to(self.device)
+        left_cond = self.x_IC==0
+        psi_cond  = misc.psi(self.y_IC, self.chi)
+        self.c_Ic = torch.where(left_cond+psi_cond==2*True, self.c1, self.c_IC)
         
-        x = torch.linspace(self.size[0], self.size[1], self.cond_points**2).to(self.device)
-        y = torch.linspace(self.size[2], self.size[3], self.cond_points**2).to(self.device)
-        t = torch.linspace(self.size[4], self.size[5], self.cond_points).to(self.device)
-        psi = torch.where(torch.abs(y - torch.max(y) / 2) <= self.chi / 2, 1., 0.).to(self.device)
-        psi = torch.stack(torch.meshgrid(psi, torch.Tensor([0 for _ in range(32)]).to(self.device))).reshape(2, -1).T[:,0]
+        # Создание массивов для граничных условий
+        x = torch.linspace(self.size[0], self.size[1], self.BC_points)
+        # y = torch.cat((torch.linspace(self.size[2], self.size[3], self.BC_points-6).to(self.device),
+                       # torch.FloatTensor([self.a-0.01, self.a, self.a+0.01, self.b-0.01, self.b, self.b+0.01]).to(self.device)))
+        y = torch.linspace(self.size[2], self.size[3], self.BC_points)
+        t = torch.linspace(self.size[4], self.size[5], self.BC_points)
 
-        # BC for c
+        # Интервал перфорации
+        psi = misc.psi(y, self.chi)
+        psi = torch.stack(torch.meshgrid(psi, torch.zeros(self.BC_points), indexing='ij')).reshape(2, -1).T[:,0]
+
+        # ГУ для концентрации
         for i in range(len(self.c_cond[0])):
             if self.c_cond[2][i]:
                 self.c_cond[0][i] = self.c_cond[0][i] * psi
             else:
-                self.c_cond[0][i] = self.c_cond[0][i] * torch.ones_like(self.IC_x)
+                self.c_cond[0][i] = self.c_cond[0][i] * torch.ones_like(psi)
 
         c_condition = cnd.form_boundaries([x, y, t], self.c_cond[0], self.ones, self.zeros)
-        self.c_f, XYT = cnd.form_condition_arrays(c_condition)
+        self.c = c_condition[:,0]
+        self.x = c_condition[:,1]
+        self.y = c_condition[:,2]
+        self.t = c_condition[:,3]
 
-        # BC for p
+        time_cond  = torch.where(self.t1 <= self.t, 1.0, 0)
+        left_side_cond = self.x==0
+        psi_cond = misc.psi(self.y, self.chi)
+        
+        # Добавление условия переменной концентрации
+        self.c = torch.where(time_cond +
+                             left_side_cond +
+                             psi_cond == 3*True,
+                             self.c2, self.c)
+        self.c = Variable(self.c, requires_grad=True)
+
+        # ГУ для давления
         for i in range(len(self.p_cond[0])):
             if self.p_cond[2][i]:
                 self.p_cond[0][i] = self.p_cond[0][i] * psi
             else:
-                self.p_cond[0][i] = self.p_cond[0][i] * torch.ones_like(self.IC_x)
+                self.p_cond[0][i] = self.p_cond[0][i] * torch.ones_like(psi)
 
-        p_condition = cnd.form_boundaries([x, y, t], self.p_cond[0], self.ones, self.zeros)
-        self.p_f, _ = cnd.form_condition_arrays(p_condition)
-
-        self.x = XYT[0]
-        self.y = XYT[1]
-        self.t = XYT[2]
-
-        # Coords for PDE
-        x_collocation = torch.linspace(self.size[0]+0.01, self.size[1]-0.01, self.collocation).to(self.device)
-        y_collocation = torch.linspace(self.size[2]+0.01, self.size[3]-0.01, self.collocation).to(self.device)
-        t_collocation = torch.linspace(self.size[4], self.size[5], self.collocation).to(self.device)
-
-        self.XYT = torch.stack(torch.meshgrid(x_collocation, y_collocation, t_collocation)).reshape(3, -1).T
-        self.XYT.requires_grad = True
-        self.X = Variable(self.XYT[:,0], requires_grad=True).to(self.device)
-        self.Y = Variable(self.XYT[:,1], requires_grad=True).to(self.device)
-        self.T = Variable(self.XYT[:,2], requires_grad=True).to(self.device)
-
-
-    def check_BC(self, cond, u, u_tb, u_lr, x, y):
-        """
-        Makes the Neumann condition on those boundaries where it is required
-        """
-        u_x = self.model.derivative(u_lr, x)
-        u_y = self.model.derivative(u_tb, y)
+        self.p = cnd.form_boundaries([x, y, t], self.p_cond[0], self.ones, self.zeros)[:,0]
         
+        # Изменение давления в соответствии с изменением концентрации
+        self.p = torch.where(time_cond +
+                             psi_cond +
+                             left_side_cond == 3*True,
+                             self.p_cond[0][3].min().item()*(1 - self.c2/self.cmax)**(self.beta), self.p)
+        self.p = Variable(self.p, requires_grad=True)
 
-        if cond[0]==1:
-            u[:self.cond_p] = u_y[:self.cond_p]
-        if cond[1]==1:
-            u[self.cond_p:2*self.cond_p] = u_y[self.cond_p:]
-        if cond[2]==1:
-            u[2*self.cond_p:3*self.cond_p] = u_x[:self.cond_p]
-        if cond[3]==1:
-            u[3*self.cond_p:] = u_x[self.cond_p:]
+        self.x_tb = Variable(self.x[:2*self.BC_points2], requires_grad=True)
+        self.y_tb = Variable(self.y[:2*self.BC_points2], requires_grad=True)
+        self.t_tb = Variable(self.t[:2*self.BC_points2], requires_grad=True)
 
-        return u
+        self.x_lr = Variable(self.x[2*self.BC_points2:], requires_grad=True)
+        self.y_lr = Variable(self.y[2*self.BC_points2:], requires_grad=True)
+        self.t_lr = Variable(self.t[2*self.BC_points2:], requires_grad=True)
+
+        # Создание координат для ДУЧП
+        # x_collocation = torch.linspace(self.size[0], self.size[1], self.PDE_points).to(self.device)
+        # y_collocation = torch.linspace(self.size[2], self.size[3], self.PDE_points).to(self.device)
+        # t_collocation = torch.linspace(self.size[4], self.size[5], self.PDE_points).to(self.device)
+        x_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[0], self.size[1]), self.ones))
+        y_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[2], self.size[3]), self.ones))
+        t_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[4], self.size[5]), self.ones))
+        
+        XYT = torch.stack(torch.meshgrid(x_collocation, y_collocation, t_collocation, indexing='ij')).reshape(3, -1)
+        self.X = Variable(XYT[0], requires_grad=True)
+        self.Y = Variable(XYT[1], requires_grad=True)
+        self.T = Variable(XYT[2], requires_grad=True)
 
 
+    def transform(self, net):
+        eps = 0.005
+        a = self.cmax * torch.sigmoid(500*(net[:,0].clone() - self.cmax)) - eps
+        net[:,0] *= torch.sigmoid(500*net[:,0]) + torch.sigmoid(500*(self.cmax - net[:,0])) - 1
+        net[:,0] += a
+    
     def PDELoss(self):
         """
         Calculates the loss from PDE
         """
-        u = self.model([self.X, self.Y, self.T])
-        u[:,0] = torch.clamp(u[:,0].clone(), max=self.cmax-0.001)
-
-        p_x = self.model.derivative(u[:,1], self.X)
-        p_y = self.model.derivative(u[:,1], self.Y)
-
-        mu12 = 12. * self.mu0 * (1. - u[:,0] / self.cmax).pow(-2.5)
-
-        v_x = -self.w**2 * p_x / mu12
-        v_y = -self.w**2 * p_y / mu12
-
-        c_x = self.model.derivative(u[:,0]*v_x*self.w, self.X)
-        c_y = self.model.derivative(u[:,0]*v_y*self.w, self.Y)
-        c_t = self.model.derivative(u[:,0]*1. *self.w, self.T)
-
-        p_xx = self.model.derivative(p_x * self.w**3 / mu12, self.X)
-        p_yy = self.model.derivative(p_y * self.w**3 / mu12, self.Y)
-
-        p = p_xx + p_yy
-        c = c_t + c_x + c_y
+        u = self.model([self.X,self.Y,self.T], self.transform)
         
-        loss_p = self.criterion(p, torch.zeros_like(p))
-        loss_c = self.criterion(c, torch.zeros_like(c))
+        c  = u[:,0]
+        px = u[:,1]
+        py = u[:,2]
+        
+        mu =  (1.0 - c / self.cmax).pow(self.beta)
 
-        loss = self.weights[0] * loss_p + self.weights[1] * loss_c
+        u_x = -self.w**2 * px / (12. * self.mu0 * mu)
+        u_y = -self.w**2 * py / (12. * self.mu0 * mu)
 
-        return loss
+        c_x = u_x * self.model.derivative(c, self.X)
+        c_y = u_y * self.model.derivative(c, self.Y)
+        c_t =       self.model.derivative(c, self.T)
+
+        u_xx = self.model.derivative(u_x, self.X)
+        u_yy = self.model.derivative(u_y, self.Y)
+
+        p_xy = self.model.derivative(px, self.Y)
+        p_yx = self.model.derivative(py, self.X)
+
+        u_ = u_xx + u_yy
+        c_ = c_t + c_x + c_y
+        
+        loss_p   = self.criterion(u_, torch.zeros_like(u_))
+        loss_c   = self.criterion(c_, torch.zeros_like(c_))
+        loss_corr = self.weights[2] * self.criterion(p_xy-p_yx, torch.zeros_like(p_xy))
+
+        loss = self.weights[0] * loss_c + self.weights[1] * loss_p
+        
+        return loss, loss_corr
     
-
     def loss_function(self):
         """
         Closure function; calculates all losses (IC, BC, PDE)
         """
+        start = self.k * time.time()
         self.optimizer.zero_grad()
 
-        # Initial conditions
-        pt_x_IC = Variable(self.IC_x, requires_grad=True).to(self.device)
-        pt_y_IC = Variable(self.IC_y, requires_grad=True).to(self.device)
-        pt_t_IC = Variable(self.IC_t, requires_grad=True).to(self.device)
-        pt_c_IC = Variable(self.IC_c, requires_grad=True).to(self.device).reshape(-1)
-
-        predictions_IC = self.model([pt_x_IC, pt_y_IC, pt_t_IC])[:,0]
-
-        loss_IC = self.weights[2] * self.criterion(predictions_IC, pt_c_IC)
-        self.IC.append(loss_IC.item())
+        # Начальное условие
+        predictions_IC = self.model([self.x_IC, self.y_IC, self.t_IC])[:,0]
+        loss_IC = self.weights[3] * self.criterion(predictions_IC, self.c_IC)
         if torch.isnan(loss_IC)==True:
             raise ValueError("nan value reached")
+        
+        # Граничные условия
+        prediction_top_bottom = self.model([self.x_tb, self.y_tb, self.t_tb], self.transform)
+        prediction_left_right = self.model([self.x_lr, self.y_lr, self.t_lr], self.transform)
 
-        # Boundary conditions
-        pt_x_tb = Variable(self.x[:2*self.cond_p], requires_grad=True).to(self.device)
-        pt_y_tb = Variable(self.y[:2*self.cond_p], requires_grad=True).to(self.device)
-        pt_t_tb = Variable(self.t[:2*self.cond_p], requires_grad=True).to(self.device)
+        prediction_c_lr = prediction_left_right[:,0]
+        prediction_px   = prediction_left_right[:,1]
+        prediction_py   = prediction_top_bottom[:,2]
 
-        pt_x_lr = Variable(self.x[2*self.cond_p:], requires_grad=True).to(self.device)
-        pt_y_lr = Variable(self.y[2*self.cond_p:], requires_grad=True).to(self.device)
-        pt_t_lr = Variable(self.t[2*self.cond_p:], requires_grad=True).to(self.device)
+        
+        prediction_c_tb = self.model.derivative(prediction_top_bottom[:,0], self.y_tb)
+        c_x = self.model.derivative(prediction_left_right[:,0], self.x_lr)
+        
+        prediction_c_lr[:self.BC_points2] *= misc.psi_th(self.y_lr[:self.BC_points2], self.a, self.b)
+        prediction_c_lr[:self.BC_points2] += (1 - misc.psi_th(self.y_lr[:self.BC_points2], self.a, self.b)) * c_x[:self.BC_points2]
+        
+        
+        loss_BC = (self.weights[4] * (self.criterion(prediction_py[:self.BC_points2],   self.p[:self.BC_points2])                     +
+                                      self.criterion(prediction_py[self.BC_points2:],   self.p[self.BC_points2:2*self.BC_points2])    +
+                                      self.criterion(prediction_px[:self.BC_points2],   self.p[2*self.BC_points2:3*self.BC_points2])  +
+                                      self.criterion(prediction_px[self.BC_points2:],   self.p[3*self.BC_points2:]))                  +
+                   
+                   self.weights[5] * (self.criterion(prediction_c_tb[:self.BC_points2], self.c[:self.BC_points2])                     +
+                                      self.criterion(prediction_c_tb[self.BC_points2:], self.c[self.BC_points2:2*self.BC_points2])    +
+                                      self.criterion(prediction_c_lr[:self.BC_points2], self.c[2*self.BC_points2:3*self.BC_points2])  +
+                                      self.criterion(prediction_c_lr[self.BC_points2:], self.c[3*self.BC_points2:]))                  )
 
-        prediction_top_bottom = self.model([pt_x_tb, pt_y_tb, pt_t_tb])
-        prediction_left_right = self.model([pt_x_lr, pt_y_lr, pt_t_lr])
-        prediction_BC = torch.cat((prediction_top_bottom, prediction_left_right))
-
-        pt_c = Variable(self.c_f, requires_grad=True).to(self.device)
-        pt_p = Variable(self.p_f, requires_grad=True).to(self.device)
-
-        prediction_p = self.check_BC(self.p_cond[1], prediction_BC[:,1], prediction_top_bottom[:,1], prediction_left_right[:,1], pt_x_lr, pt_y_tb)
-        prediction_c = self.check_BC(self.c_cond[1], prediction_BC[:,0], prediction_top_bottom[:,0], prediction_left_right[:,0], pt_x_lr, pt_y_tb)
-
-        loss_BC = self.weights[3] * torch.sqrt(self.criterion(prediction_p, pt_p)) + self.weights[4] * torch.sqrt(self.criterion(prediction_c, pt_c))
-        self.BC.append(loss_BC.item())
         if torch.isnan(loss_BC)==True:
             raise ValueError("nan value reached")
 
         # PDE
-        loss_PDE = self.PDELoss()
-        self.PDE.append(loss_PDE.item())
+        loss_PDE, loss_corr = self.PDELoss()
         if torch.isnan(loss_PDE)==True:
             raise ValueError("nan value reached")
 
-        loss = loss_PDE + loss_IC + loss_BC
+        output_hook = OutputHook()
+        self.model.sin.register_forward_hook(output_hook)
+
+        l1_lambda = 0.5
+        l2_lambda = 0.01
+        l1_penalty = 0.
+        l2_penalty = 0.
+        for output in output_hook:
+            l1_penalty += torch.norm(output, 1)
+            l2_penalty += torch.norm(output, 2)
+        l1_penalty *= l1_lambda
+        l2_penalty *= l2_lambda
+
+        loss = (loss_PDE   +
+                loss_BC    +
+                loss_IC    +
+                loss_corr  + 
+                l1_penalty +
+                l2_penalty )
+
         loss.backward()
-        
+        output_hook.clear()
         self.losses.append(loss.item())
-        
+        end = self.k * time.time()
+
         if self.CL==False:
-            if self.epoch % 10 == 0:
-                self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
-                                        f'{loss_PDE}\t','|',
-                                        f'{loss_IC}\t','|',
-                                        f'{loss_BC}\t','|',
-                                        f'{self.losses[-1]}\t','|']])
+            if self.epoch % self.k == 0:
+                self.print_tab.add_rows([['|', f'{self.epoch}\t',         '|',
+                                        f'{round(loss_PDE.item(),  6)}\t','|',
+                                        f'{round(loss_corr.item(), 6)}\t','|',
+                                        f'{round(loss_IC.item(),   6)}\t','|',
+                                        f'{round(loss_BC.item(),   6)}\t','|',
+                                        f'{round(self.losses[-1],  6)}\t','|',
+                                        f'{round(end - start, 6)}',       '|']])
                 print(self.print_tab.draw())
         else:
-            if self.epoch % 10 == 0:
-                self.print_tab.add_rows([['|',f'{self.epoch}\t','|',
-                                        f'{loss_PDE}\t','|',
-                                        f'{loss_IC}\t','|',
-                                        f'{loss_BC}\t','|',
-                                        f'{self.losses[-1]}\t','|',
-                                        f'{self.const}\t','|']])
+            if self.epoch % self.k == 0:
+                self.print_tab.add_rows([['|', f'{self.epoch}\t',         '|',
+                                        f'{round(loss_PDE.item(),  6)}\t','|',
+                                        f'{round(loss_corr.item(), 6)}\t','|',
+                                        f'{round(loss_IC.item(),   6)}\t','|',
+                                        f'{round(loss_BC.item(),   6)}\t','|',
+                                        f'{round(self.losses[-1],  6)}\t','|',
+                                        f'{self.const}\t',                '|',
+                                        f'{round(end - start, 6)}',       '|']])  
                 print(self.print_tab.draw())
         self.epoch += 1
 
@@ -273,9 +348,10 @@ class Poisson_Convection:
         """
         The main function of Net training
         """
+        self.print_tab = Texttable()
         self.print_tab.set_deco(Texttable.HEADER)
-        self.print_tab.set_cols_width([1,15,1,25,1,25,1,25,1,25,1])
-        self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|']])
+        self.print_tab.set_cols_width([1,10,1,15,1,15,1,15,1,15,1,15,1,10,1])
+        self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
         print(self.print_tab.draw())
         self.model.train()
 
@@ -295,8 +371,9 @@ class Poisson_Convection:
         
         So far only for flow rates
         """
+        self.print_tab = Texttable()
         self.print_tab.set_deco(Texttable.HEADER)
-        self.print_tab.set_cols_width([1,15,1,25,1,25,1,25,1,25,1,15,1])
+        self.print_tab.set_cols_width([1,10,1,20,1,20,1,20,1,20,1,5,1])
         self.model.train()
         self.CL=True
 
@@ -318,14 +395,15 @@ class Poisson_Convection:
                 for _ in range(self.epoch, self.Adam_epochs+1):
                     self.optimizer.step(self.loss_function)
                 
-                self.optimizer = self.model.set_optimizer('LBFGS')
-                self.optimizer.step(self.loss_function)
+                # self.optimizer = self.model.set_optimizer('LBFGS')
+                # self.optimizer.step(self.loss_function)
 
                 self.full_save(f'data/CL_v_in,{constants["v_in"]}/{param}', f'data/CL_v_in,{constants["v_in"]}/{param}_data')
                 ijk+=1
         elif constants.get("w")!=None:
             try:
-                os.mkdir(f'data/CL_w,{constants["w"]}')
+                # os.mkdir(f'data/CL_w,{constants["w"]}')
+                os.mkdir('data/megaserv')
             except FileExistsError:
                 None
             self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|','w','|']])
@@ -334,9 +412,36 @@ class Poisson_Convection:
             for param in constants["w"]:
                 self.w = param
                 self.const = param
-                self.p_cond[0][2] = -12 * self.mu0 * self.v_in / param**2 * (1 - self.c_in/self.cmax)**(-2.5)
+                self.p_cond[0][2] = -12 * self.mu0 * self.v_in / param**2 * (1 - self.c1/self.cmax)**(self.beta)
                 if torch.abs(self.p_cond[0][3].max())!=0 or torch.abs(self.p_cond[0][3].min())!=0:
-                    self.p_cond[0][3] = -12 * self.mu0 * self.v_in / param**2 * (1 - self.c_in/self.cmax)**(-2.5)
+                    self.p_cond[0][3] = -12 * self.mu0 * self.v_in / param**2
+                self.makeIBC()
+                # print (self.p_cond[0][2].min(),self.p_cond[0][3].min())
+
+                self.epoch=0
+                self.optimizer = self.model.set_optimizer('NAdam')
+                for _ in range(self.CL_epochs[ijk]):
+                    self.optimizer.step(self.loss_function)
+                
+                self.optimizer = self.model.set_optimizer('LBFGS')
+                self.optimizer.step(self.loss_function)
+
+                # self.full_save(f'data/CL_w,{constants["w"]}/{param}', f'data/CL_w,{constants["w"]}/{param}_data')
+                self.full_save(f'data/megaserv/{param}', f'data/megaserv/{param}_data')
+                ijk+=1
+        elif constants.get("c1")!=None:
+            try:
+                os.mkdir(f'data/CL_c1,{constants["c1"]}')
+            except FileExistsError:
+                None
+            self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|','c1','|']])
+            print(self.print_tab.draw())
+            ijk=0
+            for param in constants["c1"]:
+                self.c1 = param
+                self.const = param
+                self.c_cond[0][2] = self.c1
+                self.p_cond[0][2] = -12 * self.mu0 * self.v_in / self.w**2 * (1 - param/self.cmax)**(self.beta)
                 self.makeIBC()
 
                 self.epoch=0
@@ -347,7 +452,7 @@ class Poisson_Convection:
                 self.optimizer = self.model.set_optimizer('LBFGS')
                 self.optimizer.step(self.loss_function)
 
-                self.full_save(f'data/CL_w,{constants["w"]}/{param}', f'data/CL_w,{constants["w"]}/{param}_data')
+                self.full_save(f'data/CL_c1,{constants["c1"]}/{param}', f'data/CL_c1,{constants["c1"]}/{param}_data')
                 ijk+=1
         self.CL=False
     
