@@ -18,17 +18,15 @@ class Poisson_Convection:
                  mu0: np.float64,
                  cmax: np.float64,
                  v_in: np.float64,
-                 c1: np.float64,
                  chi: np.float64,
+                 transitional_times: list,
                  size: list,
                  c_cond: list,
                  p_cond: list,
                  PDE_points: int,
                  BC_points: int,
                  IC_points: int,
-                 c2: np.float64 = None,
-                 beta: np.float64 = -2.5,
-                 t1: int = None):
+                 beta: np.float64 = -2.5):
 
         # CPU/GPU
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -76,10 +74,7 @@ class Poisson_Convection:
         self.beta = beta
         self.cmax = cmax
         self.v_in = v_in
-        self.c1   = c1
-        self.c2   = c2
-        self.t1   = t1
-
+        
         # Граничные условия
         self.c_cond = deepcopy(c_cond)
         self.p_cond = deepcopy(p_cond)
@@ -87,11 +82,13 @@ class Poisson_Convection:
         # Геометрия
         self.chi  = chi
         self.size = deepcopy(size)
+        self.times = np.concatenate(([self.size[-2]], transitional_times, [self.size[-1]]))
         self.a    = (self.size[3] - self.chi)/2
         self.b    = (self.size[3] + self.chi)/2
 
-        # Создание массивов ГУ и НУ
+        # Создание сеток координат, массивов НУ и ГУ
         self.makeIBC()
+        self.PDE_coords()
 
     def full_load(self, path_nn:str, path_data:str):
         """
@@ -115,72 +112,64 @@ class Poisson_Convection:
         """
         Makes initial and boundary conditions
         """
+
+        # Тензоры точек "разрыва"
+        y_change = torch.FloatTensor([self.a, self.b]).to(self.device)
+        t_change = torch.FloatTensor(self.times[1:-1]).to(self.device)
+        
         # Создание массивов для начального условия
-        x = torch.linspace(self.size[0], self.size[1], self.IC_points)
-        y = torch.linspace(self.size[2], self.size[3], self.IC_points)
-        # x = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-2).to(self.device).uniform_(self.size[2], self.size[3]), self.ones))
-        # y = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-2).to(self.device).uniform_(self.size[4], self.size[5]), self.ones))
+        x = torch.linspace(self.size[0], self.size[1], self.IC_points).to(self.device)
+        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.IC_points-len(self.times[1:-1])).to(self.device), y_change)).sort()[0]
     
         XYT = torch.stack(torch.meshgrid(x, y, self.zeros, indexing='ij')).reshape(3, -1)
         self.x_IC = Variable(XYT[0], requires_grad=True)
         self.y_IC = Variable(XYT[1], requires_grad=True)
         self.t_IC = Variable(XYT[2], requires_grad=True)
-        self.c_IC = torch.zeros_like(self.t_IC)
 
         left_cond = self.x_IC==0
         psi_cond  = misc.psi(self.y_IC, self.chi)
-        self.c_Ic = torch.where(left_cond+psi_cond==2*True, self.c1, self.c_IC)
+        self.c_IC = torch.where(left_cond+psi_cond==2*True, self.c_cond[0], 0.)
         
         # Создание массивов для граничных условий
-        x = torch.linspace(self.size[0], self.size[1], self.BC_points)
-        # y = torch.cat((torch.linspace(self.size[2], self.size[3], self.BC_points-6).to(self.device),
-                       # torch.FloatTensor([self.a-0.01, self.a, self.a+0.01, self.b-0.01, self.b, self.b+0.01]).to(self.device)))
-        y = torch.linspace(self.size[2], self.size[3], self.BC_points)
-        t = torch.linspace(self.size[4], self.size[5], self.BC_points)
+        x = torch.linspace(self.size[0], self.size[1], self.BC_points).to(self.device)
+        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.BC_points-2).to(self.device), y_change)).sort()[0]
+        t = torch.cat((torch.linspace(self.size[4], self.size[5], self.BC_points-len(self.times[1:-1])).to(self.device), t_change)).sort()[0]
 
         # Интервал перфорации
-        psi = misc.psi(y, self.chi)
+        psi = misc.psi_th(y, self.a, self.b)
         psi = torch.stack(torch.meshgrid(psi, torch.zeros(self.BC_points), indexing='ij')).reshape(2, -1).T[:,0]
 
         # ГУ для концентрации
-        for i in range(len(self.c_cond[0])):
-            if self.c_cond[2][i]:
-                self.c_cond[0][i] = self.c_cond[0][i] * psi
-            else:
-                self.c_cond[0][i] = self.c_cond[0][i] * torch.ones_like(psi)
-
-        c_condition = cnd.form_boundaries([x, y, t], self.c_cond[0], self.ones, self.zeros)
+        zeros = torch.zeros(4*len(psi)).reshape(4, len(psi))
+        c_condition = cnd.form_boundaries([x, y, t], zeros, self.ones, self.zeros)
         self.c = c_condition[:,0]
         self.x = c_condition[:,1]
         self.y = c_condition[:,2]
         self.t = c_condition[:,3]
+        
+        self.p = cnd.form_boundaries([x, y, t], zeros, self.ones, self.zeros)[:,0]
 
-        time_cond  = torch.where(self.t1 <= self.t, 1.0, 0)
-        left_side_cond = self.x==0
+        left_side_cond = self.x==self.size[0]
         psi_cond = misc.psi(self.y, self.chi)
+        for i in range(len(self.times)-1):
+            time_start_cond = torch.where(self.t>=self.times[i], 1., 0.)
+            time_end_cond = torch.where(self.t<=self.times[i+1], 1., 0.)
+            self.c = torch.where(time_start_cond + 
+                                 time_end_cond +
+                                 left_side_cond +
+                                 psi_cond == 4*True,
+                                 self.c_cond[i], self.c)
+            
+            self.p = torch.where(time_start_cond + 
+                                 time_end_cond +
+                                 left_side_cond +
+                                 psi_cond == 4*True,
+                                 self.p_cond[i+1], self.p) 
+        right_side_cond = self.x==self.size[1]
+        self.p = torch.where(right_side_cond+psi_cond==2*True, self.p_cond[0], self.p)
         
-        # Добавление условия переменной концентрации
-        self.c = torch.where(time_cond +
-                             left_side_cond +
-                             psi_cond == 3*True,
-                             self.c2, self.c)
-        self.c = Variable(self.c, requires_grad=True)
-
-        # ГУ для давления
-        for i in range(len(self.p_cond[0])):
-            if self.p_cond[2][i]:
-                self.p_cond[0][i] = self.p_cond[0][i] * psi
-            else:
-                self.p_cond[0][i] = self.p_cond[0][i] * torch.ones_like(psi)
-
-        self.p = cnd.form_boundaries([x, y, t], self.p_cond[0], self.ones, self.zeros)[:,0]
-        
-        # Изменение давления в соответствии с изменением концентрации
-        self.p = torch.where(time_cond +
-                             psi_cond +
-                             left_side_cond == 3*True,
-                             self.p_cond[0][3].min().item()*(1 - self.c2/self.cmax)**(self.beta), self.p)
-        self.p = Variable(self.p, requires_grad=True)
+        # self.c = Variable(self.c, requires_grad=True)
+        # self.p = Variable(self.p, requires_grad=True)
 
         self.x_tb = Variable(self.x[:2*self.BC_points2], requires_grad=True)
         self.y_tb = Variable(self.y[:2*self.BC_points2], requires_grad=True)
@@ -190,13 +179,20 @@ class Poisson_Convection:
         self.y_lr = Variable(self.y[2*self.BC_points2:], requires_grad=True)
         self.t_lr = Variable(self.t[2*self.BC_points2:], requires_grad=True)
 
+
+    def PDE_coords(self):
+        # Тензоры точек "разрыва"
+        y_change = torch.FloatTensor([self.a, self.b]).to(self.device)
+        t_change = torch.FloatTensor(self.times[1:-1]).to(self.device)
         # Создание координат для ДУЧП
         # x_collocation = torch.linspace(self.size[0], self.size[1], self.PDE_points).to(self.device)
-        # y_collocation = torch.linspace(self.size[2], self.size[3], self.PDE_points).to(self.device)
-        # t_collocation = torch.linspace(self.size[4], self.size[5], self.PDE_points).to(self.device)
-        x_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[0], self.size[1]), self.ones))
-        y_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[2], self.size[3]), self.ones))
-        t_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[4], self.size[5]), self.ones))
+        # y_collocation = torch.cat((torch.linspace(self.size[2], self.size[3], self.PDE_points-2).to(self.device), y_change)).sort()[0]
+        # t_collocation = torch.cat((torch.linspace(self.size[4], self.size[5], self.PDE_points-len(self.times[1:-1])).to(self.device), t_change)).sort()[0]
+
+        x_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[0], self.size[1]), self.ones)).sort()[0]
+        y_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-4).to(self.device).uniform_(self.size[2], self.size[3]), self.ones, y_change)).sort()[0]
+        t_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2-len(self.times[1:-1])).to(self.device).uniform_(self.size[2], self.size[3]),
+                                   self.ones, t_change)).sort()[0]
         
         XYT = torch.stack(torch.meshgrid(x_collocation, y_collocation, t_collocation, indexing='ij')).reshape(3, -1)
         self.X = Variable(XYT[0], requires_grad=True)
@@ -204,12 +200,19 @@ class Poisson_Convection:
         self.T = Variable(XYT[2], requires_grad=True)
 
 
+    def update(self):
+        self.makeIBC()
+        self.PDE_coords()
+
+    
     def transform(self, net):
-        eps = 0.005
-        a = self.cmax * torch.sigmoid(500*(net[:,0].clone() - self.cmax)) - eps
+        a = self.cmax * torch.sigmoid(500*(net[:,0].clone() - self.cmax))
         net[:,0] *= torch.sigmoid(500*net[:,0]) + torch.sigmoid(500*(self.cmax - net[:,0])) - 1
         net[:,0] += a
-    
+        net[:,0] *= 0.9988
+        net[:,0] += 1/1700
+
+        
     def PDELoss(self):
         """
         Calculates the loss from PDE
@@ -269,11 +272,11 @@ class Poisson_Convection:
 
         
         prediction_c_tb = self.model.derivative(prediction_top_bottom[:,0], self.y_tb)
-        c_x = self.model.derivative(prediction_left_right[:,0], self.x_lr)
+        c_x = self.model.derivative(prediction_c_lr, self.x_lr)
         
         prediction_c_lr[:self.BC_points2] *= misc.psi_th(self.y_lr[:self.BC_points2], self.a, self.b)
         prediction_c_lr[:self.BC_points2] += (1 - misc.psi_th(self.y_lr[:self.BC_points2], self.a, self.b)) * c_x[:self.BC_points2]
-        
+        # prediction_c_lr[self.BC_points2:] = c_x[self.BC_points2:]
         
         loss_BC = (self.weights[4] * (self.criterion(prediction_py[:self.BC_points2],   self.p[:self.BC_points2])                     +
                                       self.criterion(prediction_py[self.BC_points2:],   self.p[self.BC_points2:2*self.BC_points2])    +
@@ -282,8 +285,8 @@ class Poisson_Convection:
                    
                    self.weights[5] * (self.criterion(prediction_c_tb[:self.BC_points2], self.c[:self.BC_points2])                     +
                                       self.criterion(prediction_c_tb[self.BC_points2:], self.c[self.BC_points2:2*self.BC_points2])    +
-                                      self.criterion(prediction_c_lr[:self.BC_points2], self.c[2*self.BC_points2:3*self.BC_points2])  +
-                                      self.criterion(prediction_c_lr[self.BC_points2:], self.c[3*self.BC_points2:]))                  )
+                                      self.criterion(prediction_c_lr[:self.BC_points2], self.c[2*self.BC_points2:3*self.BC_points2])) )
+                                      # self.criterion(prediction_c_lr[self.BC_points2:], self.c[3*self.BC_points2:]))                  )
 
         if torch.isnan(loss_BC)==True:
             raise ValueError("nan value reached")

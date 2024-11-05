@@ -1,6 +1,6 @@
 from numpy import sin, cos, sinh, cosh, power, pi, where
-import torch
 
+import torch
 
 def Poisson_analytical(mu, Q0, w, x, y, chi, H, L, K):
     """
@@ -14,7 +14,7 @@ def Poisson_analytical(mu, Q0, w, x, y, chi, H, L, K):
 
 
 def psi(y, chi):
-    return torch.where(abs(y - max(y) / 2).round(decimals=10) <= chi / 2, 1., 0.)
+    return torch.where(abs(y - max(y) / 2).round(decimals=5) <= chi / 2, 1., 0.)
 
 
 def heaviside(x):
@@ -26,7 +26,7 @@ def delta(x):
 
 
 def th(x, k=1, c=0, b=0):
-    return torch.tanh(k * (x - c)).round(decimals=10) + b
+    return torch.tanh(k * (x - c)).round(decimals=5) + b
 
 
 def psi_th(x, c1=0, c2=1):
