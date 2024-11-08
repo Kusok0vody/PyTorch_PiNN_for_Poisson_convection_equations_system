@@ -1,32 +1,40 @@
-import numpy as np 
 import os
 import torch
 import time
+import json
+import io
 
 from torch.autograd import Variable
 from texttable import Texttable
-from copy import deepcopy, copy
+from copy import copy
 
 import programs.conditions as cnd
 import programs.misc as misc
 from programs.NN import *
 
 
+try:
+    to_unicode = unicode
+except NameError:
+    to_unicode = str
+
 class Poisson_Convection:
     def __init__(self,
-                 w: np.float64,
-                 mu0: np.float64,
-                 cmax: np.float64,
-                 v_in: np.float64,
-                 chi: np.float64,
-                 transitional_times: list,
-                 size: list,
-                 c_cond: list,
-                 p_cond: list,
-                 PDE_points: int,
-                 BC_points: int,
-                 IC_points: int,
-                 beta: np.float64 = -2.5):
+                 w                  : float,
+                 mu0                : float,
+                 cmax               : float,
+                 u_in               : float,
+                 chi                : float,
+                 transitional_times : list,
+                 size               : list,
+                 c_cond             : list,
+                 p_cond             : list,
+                 PDE_points         : int,
+                 BC_points          : int,
+                 IC_points          : int,
+                 beta               : float = -2.5,
+                 NN_params          : dict = None
+                ):
 
         # CPU/GPU
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -35,33 +43,56 @@ class Poisson_Convection:
         # Дебаг для производной
         torch.autograd.set_detect_anomaly(False)
         
-        # Создание модели
-        self.model = Net(input_size=3,
-                         neurons_arr=[48,48,48,48,48],
-                         output_size=3,
-                         depth=4,
-                         act=Sin)
+        data = {'w'          : w,
+                'mu0'        : mu0,
+                'cmax'       : cmax,
+                'u_in'       : u_in,
+                'chi'        : chi,
+                'times'      : [size[-2]] + transitional_times + [size[-1]],
+                'size'       : size,
+                'c_cond'     : copy(c_cond),
+                'p_cond'     : copy(p_cond),
+                'PDE_points' : PDE_points,
+                'IC_points'  : IC_points,
+                'BC_points'  : BC_points,
+                'beta'       : beta,
+                'NN_params'  : NN_params
+        }
+        self.update_data(data)
 
+        # Создание модели
+        self.model = Net(input_size  = self.NN_params.get('input_size'),
+                         neurons_arr = self.NN_params.get('neurons_arr'),
+                         output_size = self.NN_params.get('output_size'),
+                         depth       = self.NN_params.get('depth'),
+                         act         = Sin)
+
+        self.optimizer = self.model.set_optimizer('NAdam')
+        
+        # Создание сеток координат, массивов НУ и ГУ
+        self.update()
+    
+    def update_data(self, data:dict):
+        
         # Итерационные переменные
-        self.Adam_epochs = 2000
-        self.losses      = []
-        self.epoch       = 0
-        self.k           = 10
+        self.Adam_epochs = data.get('Adam_epochs') if data.get('Adam_epochs')!=None else 2000
+        self.losses      = data.get('losses')      if data.get('losses')!=None      else []
+        self.epoch       = data.get('epoch')       if data.get('epoch')!=None       else 0
+        self.k           = data.get('k')           if data.get('k')!=None           else 10
 
         # Переменные числа точек
-        self.PDE_points = PDE_points
-        self.BC_points  = BC_points
+        self.PDE_points = data.get('PDE_points')
+        self.BC_points  = data.get('BC_points')
         self.BC_points2 = self.BC_points**2
-        self.IC_points  = IC_points
+        self.IC_points  = data.get('IC_points')
         
         # Вспомогаительные тензоры 0 и 1
         self.zeros = torch.FloatTensor([0]).to(self.device)
         self.ones  = torch.FloatTensor([1]).to(self.device)
 
         # Параметры для обучения
-        self.criterion = torch.nn.MSELoss()
-        self.weights   = [1,1,1,1,1,1]
-        self.optimizer = self.model.set_optimizer('Adam')
+        self.criterion = data.get('criterion') if data.get('critetion')!=None else torch.nn.MSELoss()
+        self.weights   = data.get('weights')   if data.get('weights')!=None   else [1,1,1,1,1,1]
 
         # Параметры для Cirriculum Learning
         self.CL_epochs = []
@@ -69,66 +100,120 @@ class Poisson_Convection:
         self.const     = 0
         
         # Физические Константты
-        self.w    = w
-        self.mu0  = mu0
-        self.beta = beta
-        self.cmax = cmax
-        self.v_in = v_in
-        
+        self.mu0  = data.get('mu0')
+        self.beta = data.get('beta')
+        self.cmax = data.get('cmax')
+        self.u_in = data.get('u_in')
+   
         # Граничные условия
-        self.c_cond = deepcopy(c_cond)
-        self.p_cond = deepcopy(p_cond)
+        self.c_cond = data.get('c_cond')
+        self.p_cond = data.get('p_cond')
         
         # Геометрия
-        self.chi  = chi
-        self.size = deepcopy(size)
-        self.times = np.concatenate(([self.size[-2]], transitional_times, [self.size[-1]]))
-        self.a    = (self.size[3] - self.chi)/2
-        self.b    = (self.size[3] + self.chi)/2
+        self.chi   = data.get('chi')
+        self.size  = data.get('size')
+        self.times = data.get('times') 
+        self.a     = data.get('a') if data.get('a')!=None else (self.size[3] - self.chi)/2
+        self.b     = data.get('b') if data.get('a')!=None else (self.size[3] + self.chi)/2
 
-        # Создание сеток координат, массивов НУ и ГУ
-        self.makeIBC()
-        self.PDE_coords()
+        # Параметры ширины трещины
+        self.w  = data.get('w')
+        self.w1 = data.get('w1') if data.get('w1')!=None else 0.2
+        self.w2 = data.get('w1') if data.get('w1')!=None else 2 
+        self.w3 = data.get('w1') if data.get('w1')!=None else 2
+        self.w_func = data.get('w_func') if data.get('w_func')!=None else self.w_const
 
-    def full_load(self, path_nn:str, path_data:str):
-        """
-        Loads NN and other parameters (temporarily only losses) from file
-        """
-        self.model.load_state_dict(torch.load(path_nn,map_location=torch.device('cpu')))
-        data = np.load(path_data)
-        self.losses = data[0].tolist()
+        # Параметры нейросети
+        self.NN_params = {}
+        if data.get('NN_params')!=None:
+            NN_dict = data.get('NN_params')
+            self.NN_params['input_size']  = NN_dict.get('input_size')  if NN_dict.get('input_size')!=None  else 3
+            self.NN_params['neurons_arr'] = NN_dict.get('neurons_arr') if NN_dict.get('neurons_arr')!=None else [48,48,48,48,48]
+            self.NN_params['output_size'] = NN_dict.get('output_size') if NN_dict.get('output_size')!=None else 3
+            self.NN_params['depth']       = NN_dict.get('depth')       if NN_dict.get('depth')!=None       else 4
+        else:
+            self.NN_params['input_size']  = 3
+            self.NN_params['neurons_arr'] = [48,48,48,48,48]
+            self.NN_params['output_size'] = 3
+            self.NN_params['depth']       = 4
 
+    
+    def load(self, path):
+        with open(path+'.json') as data_file:
+            data = json.load(data_file)
+        self.update_data(data)
+        self.update()
+        self.model.load_state_dict(torch.load(path, weights_only=True))
 
-    def full_save(self, path_nn:str, path_data:str):
-        """
-        Saves NN and other parameters (temporarily only losses) from file
-        """
-        torch.save(self.model.state_dict(), path_nn)
-        data = [self.losses]
-        np.save(path_data, data)
+    
+    def save(self, path):
+        data = {'Adam_epochs' : self.Adam_epochs,
+                'losses'      : self.losses,
+                'epoch'       : self.epoch,
+                'k'           : self.k,
+                'PDE_points'  : self.PDE_points,
+                'BC_points'   : self.BC_points,
+                'IC_points'   : self.IC_points,
+                'weights'     : self.weights,
+                'mu0'         : self.mu0,
+                'beta'        : self.beta,
+                'cmax'        : self.cmax,
+                'u_in'        : self.u_in,
+                'c_cond'      : self.c_cond,
+                'p_cond'      : self.p_cond,
+                'chi'         : self.chi,
+                'size'        : self.size,
+                'times'       : self.times,
+                'a'           : self.a,
+                'b'           : self.b,
+                'w'           : self.w,
+                'w1'          : self.w1,
+                'w2'          : self.w2,
+                'w3'          : self.w3,
+                'NN_params'   : self.NN_params
+               }
+        with io.open(path+'.json', 'w', encoding='utf8') as outfile:
+            str_ = json.dumps(data,
+                              indent=4, sort_keys=True,
+                              separators=(',', ': '), ensure_ascii=False)
+            outfile.write(to_unicode(str_))
+        torch.save(self.model.state_dict(), path)
 
+    
+    def w_const(self, x, y):    return self.w
 
+    def w_sincos(self, x, y):   return self.w + self.w1 * torch.cos(torch.pi*x) * torch.sin(torch.pi*y)
+    
+    def w_elliptic(self, x, y): return self.w + self.w1 * ((x / self.w2)**2 + (y / self.w3)**2)
+
+    def w_wave(self,x,y):       return self.w + self.w1 * torch.sin(torch.pi*(self.w2*x-self.w3*y))
+    
+    
     def makeIBC(self):
         """
         Makes initial and boundary conditions
         """
 
         # Тензоры точек "разрыва"
+        x_change = torch.FloatTensor([0.2, 0.4]).to(self.device)
         y_change = torch.FloatTensor([self.a, self.b]).to(self.device)
         t_change = torch.FloatTensor(self.times[1:-1]).to(self.device)
         
         # Создание массивов для начального условия
-        x = torch.linspace(self.size[0], self.size[1], self.IC_points).to(self.device)
-        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.IC_points-len(self.times[1:-1])).to(self.device), y_change)).sort()[0]
-    
+        x = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-4).to(self.device).uniform_(self.size[0], self.size[1]), self.ones, x_change)).sort()[0]
+        y = torch.cat((self.zeros, torch.FloatTensor(self.IC_points-4).to(self.device).uniform_(self.size[2], self.size[3]), self.ones, y_change)).sort()[0]
+        
         XYT = torch.stack(torch.meshgrid(x, y, self.zeros, indexing='ij')).reshape(3, -1)
         self.x_IC = Variable(XYT[0], requires_grad=True)
         self.y_IC = Variable(XYT[1], requires_grad=True)
         self.t_IC = Variable(XYT[2], requires_grad=True)
 
-        left_cond = self.x_IC==0
-        psi_cond  = misc.psi(self.y_IC, self.chi)
-        self.c_IC = torch.where(left_cond+psi_cond==2*True, self.c_cond[0], 0.)
+        # left_cond = self.x_IC==0
+        # psi_cond  = misc.psi(self.y_IC, self.chi)
+        # self.c_IC = torch.where(left_cond+psi_cond==2*True, self.c_cond[0], 0.)
+        aa = torch.where(self.x_IC>=0.3, 1, 0)
+        bb = torch.where(self.x_IC<=0.5, 1, 0)
+        self.c_IC = torch.where(aa+bb==2, 0.6, 0)
         
         # Создание массивов для граничных условий
         x = torch.linspace(self.size[0], self.size[1], self.BC_points).to(self.device)
@@ -166,10 +251,8 @@ class Poisson_Convection:
                                  psi_cond == 4*True,
                                  self.p_cond[i+1], self.p) 
         right_side_cond = self.x==self.size[1]
-        self.p = torch.where(right_side_cond+psi_cond==2*True, self.p_cond[0], self.p)
-        
-        # self.c = Variable(self.c, requires_grad=True)
-        # self.p = Variable(self.p, requires_grad=True)
+        self.p  = torch.where(right_side_cond+psi_cond==2*True, self.p_cond[0], self.p)
+        self.p /= self.w_func(self.x, self.y)**2
 
         self.x_tb = Variable(self.x[:2*self.BC_points2], requires_grad=True)
         self.y_tb = Variable(self.y[:2*self.BC_points2], requires_grad=True)
@@ -184,11 +267,8 @@ class Poisson_Convection:
         # Тензоры точек "разрыва"
         y_change = torch.FloatTensor([self.a, self.b]).to(self.device)
         t_change = torch.FloatTensor(self.times[1:-1]).to(self.device)
+        
         # Создание координат для ДУЧП
-        # x_collocation = torch.linspace(self.size[0], self.size[1], self.PDE_points).to(self.device)
-        # y_collocation = torch.cat((torch.linspace(self.size[2], self.size[3], self.PDE_points-2).to(self.device), y_change)).sort()[0]
-        # t_collocation = torch.cat((torch.linspace(self.size[4], self.size[5], self.PDE_points-len(self.times[1:-1])).to(self.device), t_change)).sort()[0]
-
         x_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2).to(self.device).uniform_(self.size[0], self.size[1]), self.ones)).sort()[0]
         y_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-4).to(self.device).uniform_(self.size[2], self.size[3]), self.ones, y_change)).sort()[0]
         t_collocation = torch.cat((self.zeros, torch.FloatTensor(self.PDE_points-2-len(self.times[1:-1])).to(self.device).uniform_(self.size[2], self.size[3]),
@@ -225,8 +305,8 @@ class Poisson_Convection:
         
         mu =  (1.0 - c / self.cmax).pow(self.beta)
 
-        u_x = -self.w**2 * px / (12. * self.mu0 * mu)
-        u_y = -self.w**2 * py / (12. * self.mu0 * mu)
+        u_x = -self.w_func(self.X, self.Y)**2 * px / (12. * self.mu0 * mu)
+        u_y = -self.w_func(self.X, self.Y)**2 * py / (12. * self.mu0 * mu)
 
         c_x = u_x * self.model.derivative(c, self.X)
         c_y = u_y * self.model.derivative(c, self.Y)
@@ -380,16 +460,16 @@ class Poisson_Convection:
         self.model.train()
         self.CL=True
 
-        if constants.get("v_in")!=None:
+        if constants.get("u_in")!=None:
             try:
-                os.mkdir(f'data/CL_v_in,{constants["v_in"]}')
+                os.mkdir(f'data/CL_u_in,{constants["u_in"]}')
             except FileExistsError:
                 None
             self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','IC loss','|','BC loss','|','Summary loss','|','v_x','|']])
             print(self.print_tab.draw())
             ijk=0
-            for param in constants["v_in"]:
-                self.v_in = param
+            for param in constants["u_in"]:
+                self.u_in = param
                 self.const = param
                 self.makeIBC()
 
@@ -401,7 +481,7 @@ class Poisson_Convection:
                 # self.optimizer = self.model.set_optimizer('LBFGS')
                 # self.optimizer.step(self.loss_function)
 
-                self.full_save(f'data/CL_v_in,{constants["v_in"]}/{param}', f'data/CL_v_in,{constants["v_in"]}/{param}_data')
+                self.full_save(f'data/CL_u_in,{constants["u_in"]}/{param}', f'data/CL_u_in,{constants["u_in"]}/{param}_data')
                 ijk+=1
         elif constants.get("w")!=None:
             try:
@@ -415,9 +495,9 @@ class Poisson_Convection:
             for param in constants["w"]:
                 self.w = param
                 self.const = param
-                self.p_cond[0][2] = -12 * self.mu0 * self.v_in / param**2 * (1 - self.c1/self.cmax)**(self.beta)
+                self.p_cond[0][2] = -12 * self.mu0 * self.u_in / param**2 * (1 - self.c1/self.cmax)**(self.beta)
                 if torch.abs(self.p_cond[0][3].max())!=0 or torch.abs(self.p_cond[0][3].min())!=0:
-                    self.p_cond[0][3] = -12 * self.mu0 * self.v_in / param**2
+                    self.p_cond[0][3] = -12 * self.mu0 * self.u_in / param**2
                 self.makeIBC()
                 # print (self.p_cond[0][2].min(),self.p_cond[0][3].min())
 
@@ -444,7 +524,7 @@ class Poisson_Convection:
                 self.c1 = param
                 self.const = param
                 self.c_cond[0][2] = self.c1
-                self.p_cond[0][2] = -12 * self.mu0 * self.v_in / self.w**2 * (1 - param/self.cmax)**(self.beta)
+                self.p_cond[0][2] = -12 * self.mu0 * self.u_in / self.w**2 * (1 - param/self.cmax)**(self.beta)
                 self.makeIBC()
 
                 self.epoch=0
@@ -458,7 +538,7 @@ class Poisson_Convection:
                 self.full_save(f'data/CL_c1,{constants["c1"]}/{param}', f'data/CL_c1,{constants["c1"]}/{param}_data')
                 ijk+=1
         self.CL=False
-    
 
+    
     def eval_(self):
         self.model.eval()

@@ -1,13 +1,11 @@
 import numpy as np 
 import torch
 import torch.nn as nn
-import programs.misc as misc
 
 from torch.autograd import grad
 from collections import OrderedDict
 
 torch.manual_seed(1234)
-
 
 class Sin(nn.Module):
     """
@@ -97,9 +95,9 @@ class Net(nn.Module):
         if optimizer_type=='LBFGS':
             return torch.optim.LBFGS(self.parameters(),
                                      # lr=0.1, 
-                                     max_iter=50000, 
-                                     max_eval=50000, 
-                                     history_size=150,
+                                     max_iter=100000, 
+                                     max_eval=100000, 
+                                     history_size=200,
                                      tolerance_grad=1e-12, 
                                      tolerance_change=0.5 * np.finfo(float).eps,
                                      line_search_fn="strong_wolfe")
