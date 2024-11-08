@@ -41,6 +41,14 @@ def delta_th(y, c=0):
     return th(-500, y, c, 1) * th(500, y, c, 1)
 
 
+def w_sincos(x, y, a=0, b=1):
+    return a + b * torch.cos(torch.pi*x) * torch.sin(torch.pi*y)
+
+
+def w_elliptic(x, y, a=0, b=1, c=1, d=1):
+    return a + b*((x/c)**2 + (y/d)**2)
+    
+
 def viscosity(mu_0, c, c_max, beta=-2.5):
     return mu_0 * (1 - c / c_max) ** (beta)
 
