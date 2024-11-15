@@ -376,7 +376,7 @@ class Poisson_Convection:
         Closure function; calculates all losses (IC, BC, PDE)
         """
         start = self.k * time.time()
-        self.optimizer.zero_grad()
+        self.model.optimizer().zero_grad()
 
         # Начальное условие
         predictions_IC = self.model([self.x_IC, self.y_IC, self.t_IC])[:,0]
@@ -492,15 +492,15 @@ class Poisson_Convection:
         self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
         print(self.print_tab.draw())
         self.model.train()
-
-        self.optimizer = self.model.set_optimizer('NAdam')
+        
+        self.model.set_optimizer('NAdam')
 
         if self.epoch <= self.Adam_epochs+1:
             for _ in range(self.epoch, self.Adam_epochs+1):
-                self.optimizer.step(self.loss_function)
+                self.model.optimizer().step(self.loss_function)
         
-        self.optimizer = self.model.set_optimizer('LBFGS')
-        self.optimizer.step(self.loss_function)
+        self.model.set_optimizer('LBFGS')
+        self.model.optimizer().step(self.loss_function)
 
     
     def CL_train(self, constants:dict):

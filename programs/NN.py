@@ -33,7 +33,7 @@ class Net(nn.Module):
 
         layerDict = OrderedDict(layers)
         self.layers = torch.nn.Sequential(layerDict)
-        self.sin = act
+        self.sin = obj.Sin()
 
     def forward(self, inputs: list, transform_func=None):
         """
