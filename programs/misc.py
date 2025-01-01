@@ -63,7 +63,7 @@ def derivative(dx, x, order=1)->torch.Tensor:
 
     return dx
 
-def psi(y, chi):
+def psi(y, chi, y_max):
     """
     Returns a step function with a value of 1 within a given interval for lists and NumPy arrays.
 
@@ -73,8 +73,10 @@ def psi(y, chi):
         Array of coordinates.
     chi : float
         The length of the interval in which the function value is equal to 1.
+    y_max : float
+        Length of the whole interval.
     """
-    return torch.where(abs(y - max(y) / 2).round(decimals=5) <= chi / 2, 1., 0.)
+    return torch.where((y - y_max / 2).abs().round(decimals=5) <= chi / 2, 1., 0.)
 
 
 def heaviside(x):

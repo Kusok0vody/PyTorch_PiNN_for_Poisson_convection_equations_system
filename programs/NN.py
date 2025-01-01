@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import programs.objects as obj
+import numpy as np
 
 from collections import OrderedDict
 
@@ -23,17 +24,17 @@ class Net(nn.Module):
         super(Net, self).__init__()
         
         layers = [('input', torch.nn.Linear(input_size, neurons_arr[0]))]
-        layers.append(('input_activation', act()))
+        layers.append(('input_activation', act))
         for i in range(depth): 
             layers.append(
                 ('hidden_%d' % i, torch.nn.Linear(neurons_arr[i], neurons_arr[i+1]))
             )
-            layers.append(('activation_%d' % i, act()))
+            layers.append(('activation_%d' % i, act))
+            # layers.append(('norm_%d' % i, nn.LayerNorm(neurons_arr[i+1])))
         layers.append(('output', torch.nn.Linear(neurons_arr[-1], output_size)))
 
         layerDict = OrderedDict(layers)
         self.layers = torch.nn.Sequential(layerDict)
-        self.sin = obj.Sin()
 
     def forward(self, inputs: list, transform_func=None):
         """
@@ -45,12 +46,31 @@ class Net(nn.Module):
         if transform_func!=None:
             transform_func(outputs, inputs)
         return outputs
-    
-    def set_optimizer(self, name):
-        self.optimizer = obj.Optimizer(name, self.parameters)
 
+
+    def set_optimizer(self, optimizer_type:str, max_iter=50000):
+        """
+        Sets the optimizer for Neural Network
+        
+        Types: Adam, LBFGS
+        """
+        if optimizer_type=='Adam':
+            return torch.optim.Adam(self.parameters(), weight_decay=1e-5)
+        if optimizer_type=='NAdam':
+            return torch.optim.NAdam(self.parameters(), weight_decay=1e-5)
+        if optimizer_type=='LBFGS':
+            return torch.optim.LBFGS(self.parameters(),
+                                     # lr=0.1, 
+                                     max_iter=max_iter, 
+                                     max_eval=max_iter, 
+                                     history_size=200,
+                                     tolerance_grad=1e-12, 
+                                     tolerance_change=0.5 * np.finfo(float).eps,
+                                     line_search_fn="strong_wolfe")
+
+    
     @staticmethod
     def init_weights(m):
         if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight)
+            torch.nn.init.xavier_normal_(m.weight)
             m.bias.data.fill_(0.01)
