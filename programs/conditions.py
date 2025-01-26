@@ -2,27 +2,24 @@ import torch
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def form_condiition(ranges:list, arr):
+def form_condiition(ranges:list):
     """
     Forms an array with a condition at given coordinates
     """
-    boundary = arr
-    mesh = torch.stack(torch.meshgrid(ranges, indexing='ij')).reshape(len(ranges), -1)
-    boundary = torch.vstack([boundary, mesh])
-    return boundary.T
+    return torch.stack(torch.meshgrid(ranges, indexing='ij')).reshape(len(ranges), -1).T
+    
 
-
-def form_boundaries(ranges, cond, ones, zeros):
+def form_boundaries(ranges, ones, zeros):
     """
     Generates an array of boundary conditions
 
     Border order – top, bottom, left, right
     """
     if len(ranges)==3:
-        u_top    = form_condiition([ranges[0], ones,      ranges[2]], cond[0])
-        u_bottom = form_condiition([ranges[0], zeros,     ranges[2]], cond[1])
-        u_left   = form_condiition([zeros,     ranges[1], ranges[2]], cond[2])
-        u_right  = form_condiition([ones,      ranges[1], ranges[2]], cond[3])
+        u_top    = form_condiition([ranges[0], ones,      ranges[2]])
+        u_bottom = form_condiition([ranges[0], zeros,     ranges[2]])
+        u_left   = form_condiition([zeros,     ranges[1], ranges[2]])
+        u_right  = form_condiition([ones,      ranges[1], ranges[2]])
     if len(ranges)==2:
         u_top = form_condiition([ranges[0], ones], cond[0])
         u_bottom = form_condiition([ranges[0], zeros], cond[1])

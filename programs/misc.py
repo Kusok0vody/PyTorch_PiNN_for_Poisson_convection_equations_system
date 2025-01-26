@@ -157,6 +157,14 @@ def viscosity(mu0, c, cmax, beta=-2.5):
     """
     return mu0 * (1 - c / cmax) ** (beta)
 
+def extremum(x):
+    a = x.max()
+    b = x.min()
+    if a.abs() >= b.abs():
+        return a
+    else:
+        return b
+
 
 def compare_viscosity(c1, c2, cmax, beta=-2.5):
     return viscosity(1,c1,cmax,beta) / viscosity(1,c2,cmax,beta)

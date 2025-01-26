@@ -58,12 +58,19 @@ class Poisson_Convection:
         self.make_distributed_points()
     
     def update_data(self, data:dict):
-        # Iteration variables
+        # Training parameters
+        self.crit_func = torch.nn.MSELoss()
+        self.weights   = data.setdefault('weights', [1,1,1,1,1,1,1,1])
         self.Adam_epochs = data.setdefault('Adam_epochs', 1000)
         self.epoch       = data.setdefault('epoch', 0)
         self.k           = data.setdefault('k', 10)
-        self.max_epoch   = data.setdefault('max_epoch',50000)
-
+        self.max_epoch   = data.setdefault('max_epoch', 50000)
+        self.max_iter    = data.setdefault('max_iter',  2)
+        self.save_after  = data.setdefault('save_after',  True)
+        self.path        = data.setdefault('path',  '')
+        self.start       = time.time()
+        self.end         = time.time()
+        
         # Loss arrays
         self.losses = data.setdefault('losses', [])
         self.PDE    = data.setdefault('PDE',    [])
@@ -74,12 +81,6 @@ class Poisson_Convection:
         # Auxiliary tensors 0 and 1
         self.zeros = torch.FloatTensor([0]).to(self.device)
         self.ones  = torch.FloatTensor([1]).to(self.device)
-
-        # Training parameters
-        self.criterion = torch.nn.MSELoss()
-        self.weights   = data.setdefault('weights', [1,1,1,1,1,1,1])
-        self.adaptive_points = True
-        self.adaptive_freq = data.setdefault('adaptive_freq', 10000)
         
         # Physical constants
         self.mu0  = data.get('mu0')
@@ -132,8 +133,22 @@ class Poisson_Convection:
             self.NN_params['output_size'] = 3
             self.NN_params['depth']       = 4
 
+    @staticmethod
+    def load(path, loadloss=True):
+        with open(path + '.json') as data_file:
+            data = json.load(data_file)
+        if loadloss:
+            with open(path + '_loss.json') as data_file:
+                data_loss = json.load(data_file)
+            data = {**data, **data_loss}
     
-    def load(self, path, loadloss=True):
+        # Create a new Poisson_Convection instance
+        instance = Poisson_Convection(data)
+        instance.model.load_state_dict(torch.load(path, weights_only=True))
+        instance.make_distributed_points()
+        return instance
+    
+    def update_from_file(self, path, loadloss=True):
         with open(path+'.json') as data_file:
             data = json.load(data_file)
         if loadloss:
@@ -141,8 +156,8 @@ class Poisson_Convection:
                 data_loss = json.load(data_file)
             data = {**data, **data_loss}
         self.update_data(data)
-        self.make_distributed_points()
         self.model.load_state_dict(torch.load(path, weights_only=True))
+        self.make_distributed_points()
 
     
     def save(self, path, saveloss=True):
@@ -150,6 +165,9 @@ class Poisson_Convection:
                 'epoch'       : self.epoch,
                 'k'           : self.k,
                 'max_epoch'   : self.max_epoch,
+                'max_iter'    : self.max_iter,
+                'save_after'  : self.save_after,
+                'path'        : self.path,
                 'weights'     : self.weights,
                 'mu0'         : self.mu0,
                 'beta'        : self.beta,
@@ -210,144 +228,179 @@ class Poisson_Convection:
         
     
     def Boundary_conditions(self, x, y, t):
-        psi = misc.psi(y, self.chi, self.size[3])
-        self.c = torch.zeros(len(psi))
-        self.p = torch.zeros(len(psi))
-                            
-        left_side_cond = torch.where(x==self.size[0], 1, 0)
-        psi_cond = misc.psi(y, self.chi, self.size[3])
-        times = [self.size[4]] + self.times + [self.size[5]]
-        for i in range(len(times)-1):
-            time_start_cond = torch.where(t>=times[i], 1., 0.)
-            time_end_cond = torch.where(t<=times[i+1], 1., 0.)
-            self.c = torch.where(time_start_cond + 
-                                 time_end_cond   +
-                                 left_side_cond  +
-                                 psi_cond     == 4,
-                                 self.c_cond[i], self.c)
+        with torch.no_grad():
+            psi = misc.psi(y, self.chi, self.size[3])
+            c = torch.zeros(len(psi))
+            p = torch.zeros(len(psi))
+            u = torch.zeros(len(psi))
+                                
+            left_side_cond = torch.where(x==self.size[0], 1, 0)
+            psi_cond = misc.psi(y, self.chi, self.size[3])
+            times = [self.size[4]] + self.times + [self.size[5]]
+            for i in range(len(times)-1):
+                time_start_cond = torch.where(t>=times[i], 1., 0.)
+                time_end_cond = torch.where(t<=times[i+1], 1., 0.)
+                c = torch.where(time_start_cond + 
+                                time_end_cond   +
+                                left_side_cond  +
+                                psi_cond     == 4,
+                                self.c_cond[i], c)
+                
+                p = torch.where(time_start_cond + 
+                                time_end_cond   +
+                                left_side_cond  +
+                                psi_cond     == 4,
+                                -misc.viscosity(self.mu0, self.c_cond[i], self.cmax, self.beta), p) 
+                
+                u = torch.where(time_start_cond + 
+                                time_end_cond   +
+                                left_side_cond  +
+                                psi_cond     == 4,
+                                self.u_in, u) 
             
-            self.p = torch.where(time_start_cond + 
-                                 time_end_cond   +
-                                 left_side_cond  +
-                                 psi_cond     == 4,
-                                 -misc.viscosity(self.mu0, self.c_cond[i], self.cmax, self.beta), self.p) 
-            
-        right_side_cond = torch.where(x==self.size[1], 1, 0)
-        self.p  = torch.where(right_side_cond+psi_cond==2, -self.mu0, self.p)
-        self.p *= 12 * self.u_in / self.w_func(x, y)**2
+            right_side_cond = torch.where(x==self.size[1], 1, 0)
+            w_right = (psi_cond*self.w_func(self.ones*self.size[0],y)).sum() / (psi_cond*self.w_func(self.ones*self.size[1],y)).sum()
+            p  = torch.where(right_side_cond+psi_cond==2, -self.mu0 * w_right, p)
+            p *= 12 * self.u_in / self.w_func(x, y)**2
+            u  = torch.where(right_side_cond+psi_cond==2,self.u_in * w_right, u)
+            return c, p, u
         
     
-    def make_BC_dist(self, dist):
-        norm_dist = dist/dist.sum()
-        sampled_indices = torch.multinomial(norm_dist, self.BC_points2, replacement=True)
-
-        t = (sampled_indices % self.BC_points) / self.BC_points * (self.size[1] - self.size[0]) + self.size[0]
-        xy = (sampled_indices // self.BC_points) / self.BC_points * (self.size[3] - self.size[2]) + self.size[2]
+    def make_BC_dist(self, dist, xy, t):
+        sampled_indices = torch.multinomial(dist/dist.sum(), self.BC_points2, replacement=True)
+        xy = torch.index_select(xy, -1, sampled_indices)
+        t  = torch.index_select(t,  -1, sampled_indices)
         return xy, t
 
     
     def make_distributed_points(self):
         # IC
-        with torch.no_grad():
-            x = torch.linspace(self.size[0], self.size[1],self.IC_points)
-            y = torch.linspace(self.size[2], self.size[3],self.IC_points)
-            xy = torch.stack(torch.meshgrid(x, y, indexing='ij')).reshape(2, -1)
-            
-            x = Variable(xy[1])
-            y = Variable(xy[0])
-            t = Variable(torch.zeros_like(xy[1]))
+        x = torch.linspace(self.size[0], self.size[1], self.IC_points).to(self.device)
+        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.IC_points-2).to(self.device), self.y_change))
+        xy_linear = torch.stack(torch.meshgrid(x, y, indexing='ij')).reshape(2, -1).T
 
-            if self.epoch!=0:
-                ic_dist = (self.model([x,y,t], self.transform)[:,0] - self.c_IC).abs()
+        x = torch.Tensor(self.IC_points**2).to(self.device).uniform_(self.size[0], self.size[1])
+        y = torch.Tensor(self.IC_points**2).to(self.device).uniform_(self.size[2], self.size[3])
+        
+        try: self.x_IC
+        except AttributeError:
+            self.x_IC = torch.Tensor([]).to(self.device)
+            self.y_IC = torch.Tensor([]).to(self.device)
+
+        x = Variable(torch.cat((x, self.x_IC)))
+        y = Variable(torch.cat((y, self.y_IC)))
+        t = Variable(torch.zeros_like(x))
+
+        if self.epoch==0:
+            self.c_IC = torch.zeros_like(x) 
+        else:
+            if self.IC_type=='square':
+                self.c_IC = self.IC_const*misc.psi(x, self.band_val, self.size[1])*misc.psi(y, self.band_val, self.size[3])
             else:
-                ic_dist = torch.ones(x.shape)
-            norm_ic = ic_dist/ic_dist.sum()
+                self.c_IC = self.IC_const*torch.ones_like(x)     
 
-            sampled_indices_ic = torch.multinomial(norm_ic, self.IC_points**2, replacement=True)
+        ic_dist = (self.model([x,y,t], self.transform)[:,0] - self.c_IC).abs()
+        self.ic_dist = ic_dist
+        if (ic_dist.sum()==0).item(): ic_dist = torch.ones_like(ic_dist)
+        sampled_indices_ic = torch.multinomial(ic_dist/ic_dist.sum(), self.IC_points**2, replacement=True)
             
-            x = (sampled_indices_ic % self.IC_points) / self.IC_points * (self.size[1] - self.size[0]) + self.size[0]
-            y = (sampled_indices_ic // self.IC_points) / self.IC_points * (self.size[3] - self.size[2]) + self.size[2]
-            
-        self.x_IC = Variable(x, requires_grad=True)
-        self.y_IC = Variable(y, requires_grad=True)
-        self.t_IC = Variable(torch.zeros_like(x), requires_grad=True)
+        self.x_IC = Variable(torch.cat((xy_linear[:,0], torch.index_select(x, -1, sampled_indices_ic))), requires_grad=True)
+        self.y_IC = Variable(torch.cat((xy_linear[:,1], torch.index_select(y, -1, sampled_indices_ic))), requires_grad=True)
+        self.t_IC = Variable(torch.zeros_like(self.x_IC), requires_grad=True)
+        
         if self.IC_type=='square':
             self.c_IC = self.IC_const*misc.psi(self.x_IC, self.band_val, self.size[1])*misc.psi(self.y_IC, self.band_val, self.size[3])
         else:
             self.c_IC = self.IC_const*torch.ones_like(self.x_IC)
         self.c_IC += self.c_cond[0] * misc.psi(self.y_IC, self.chi, self.size[3]) * torch.where(self.x_IC==0, 1, 0)
         
-        # PDE
-        x = torch.linspace(self.size[0], self.size[1],self.PDE_points)
-        y = torch.linspace(self.size[2], self.size[3],self.PDE_points)
-        t = torch.linspace(self.size[4], self.size[5],self.PDE_points)
-        xy = torch.stack(torch.meshgrid(x, y, t, indexing='ij')).reshape(3, -1)
-        x = Variable(xy[0], requires_grad=True)
-        y = Variable(xy[1], requires_grad=True)
-        t = Variable(xy[2], requires_grad=True)
+        # PDE Points
+        x = torch.linspace(self.size[0], self.size[1], self.PDE_points)
+        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.PDE_points-2).to(self.device), self.y_change))
+        t = torch.cat((torch.linspace(self.size[4], self.size[5], self.PDE_points-len(self.times[1:-1])).to(self.device), self.t_change))
+        xyt_linear = torch.stack(torch.meshgrid(x, y, t, indexing='ij')).reshape(3, -1).T
+
+        x = torch.Tensor(self.PDE_points**3).to(self.device).uniform_(self.size[0], self.size[1])
+        y = torch.Tensor(self.PDE_points**3).to(self.device).uniform_(self.size[2], self.size[3])
+        t = torch.Tensor(self.PDE_points**3).to(self.device).uniform_(self.size[4], self.size[5])
+
+        try: self.x_PDE
+        except AttributeError:
+            self.x_PDE = torch.Tensor([]).to(self.device)
+            self.y_PDE = torch.Tensor([]).to(self.device)
+            self.t_PDE = torch.Tensor([]).to(self.device)
+        
+        x = Variable(torch.cat((x, self.x_PDE)), requires_grad=True)
+        y = Variable(torch.cat((y, self.y_PDE)), requires_grad=True)
+        t = Variable(torch.cat((t, self.t_PDE)), requires_grad=True)
         conv, div, pxy = self.compute_PDE(x,y,t)
         
-        with torch.no_grad():
-            pde_dist = self.weights[0]*conv.abs().data + self.weights[1]*div.abs().data + self.weights[2]*pxy.abs().data
-        
-            norm_pde = pde_dist/pde_dist.sum()
-            sampled_indices_pde = torch.multinomial(norm_pde, self.PDE_points**3, replacement=True)
-            
-            X = ((sampled_indices_pde % self.PDE_points) / self.PDE_points) * (self.size[1] - self.size[0])
-            Y = ((sampled_indices_pde % (self.PDE_points * self.PDE_points) // self.PDE_points) / self.PDE_points) * (self.size[3] - self.size[2])
-            T = ((sampled_indices_pde // (self.PDE_points * self.PDE_points)) / self.PDE_points) * (self.size[5] - self.size[4])
+        pde_dist = self.weights[0]*conv.abs().data + \
+                   self.weights[1]*div.abs().data  + \
+                   self.weights[2]*pxy.abs().data
+        pde_dist = (pde_dist - pde_dist.min()) / (pde_dist.max() - pde_dist.min())
+        sampled_indices_pde = torch.multinomial(pde_dist/pde_dist.sum(), self.PDE_points**3, replacement=True)
 
-        self.X = Variable(T, requires_grad=True)
-        self.Y = Variable(Y, requires_grad=True)
-        self.T = Variable(X, requires_grad=True)
+        self.x_PDE = Variable(torch.cat((xyt_linear[:,0], torch.index_select(x, -1, sampled_indices_pde))), requires_grad=True)
+        self.y_PDE = Variable(torch.cat((xyt_linear[:,1], torch.index_select(y, -1, sampled_indices_pde))), requires_grad=True)
+        self.t_PDE = Variable(torch.cat((xyt_linear[:,2], torch.index_select(t, -1, sampled_indices_pde))), requires_grad=True)
         
         # BC
-        with torch.no_grad():
-            x = torch.linspace(self.size[0], self.size[1], self.BC_points).to(self.device)
-            y = torch.cat((torch.linspace(self.size[2], self.size[3], self.BC_points-2).to(self.device), self.y_change)).sort()[0]
-            t = torch.cat((torch.linspace(self.size[4], self.size[5], self.BC_points-len(self.times[1:-1])).to(self.device), self.t_change)).sort()[0]
-            
-            psi = misc.psi(y, self.chi, self.size[3])
-            psi = torch.stack(torch.meshgrid(psi, torch.zeros(self.BC_points), indexing='ij')).reshape(2, -1).T[:,0]
-    
-            zeros = torch.zeros((4, len(psi)))
-            c_condition = cnd.form_boundaries([x, y, t], zeros, self.ones, self.zeros)
+        x = torch.linspace(self.size[0], self.size[1], self.BC_points)
+        y = torch.cat((torch.linspace(self.size[2], self.size[3], self.BC_points-2).to(self.device), self.y_change))
+        t = torch.cat((torch.linspace(self.size[4], self.size[5], self.BC_points-len(self.times[1:-1])).to(self.device), self.t_change))
+        c_condition_linear = cnd.form_boundaries([x, y, t], self.ones, self.zeros)
+        
+        x = torch.Tensor(self.BC_points).to(self.device).uniform_(self.size[0], self.size[1])
+        y = torch.Tensor(self.BC_points).to(self.device).uniform_(self.size[2], self.size[3])
+        t = torch.Tensor(self.BC_points).to(self.device).uniform_(self.size[4], self.size[5])
 
-            x = Variable(c_condition[:,1], requires_grad=True)
-            y = Variable(c_condition[:,2], requires_grad=True)
-            t = Variable(c_condition[:,3], requires_grad=True)
-            self.Boundary_conditions(x,y,t)
+        psi = misc.psi(y, self.chi, self.size[3])
+        psi = torch.stack(torch.meshgrid(psi, torch.zeros(self.BC_points), indexing='ij')).reshape(2, -1).T[:,0]
 
-            bc_dist = self.model([x,y,t], self.transform)
-                
-            bc_dist_top    = (bc_dist[:,2][:self.BC_points2] - self.p[:self.BC_points2]).abs()
-            xtop, t1 = self.make_BC_dist(bc_dist_top)
+        c_condition_random = cnd.form_boundaries([x, y, t], self.ones, self.zeros)
 
-            bc_dist_bottom = (bc_dist[:,2][self.BC_points2:2*self.BC_points2] - self.p[self.BC_points2:2*self.BC_points2]).abs()
-            xbottom, t2 = self.make_BC_dist(bc_dist_bottom)
+        x = Variable(torch.cat((c_condition_linear[:,0], c_condition_random[:,0])), requires_grad=True)
+        y = Variable(torch.cat((c_condition_linear[:,1], c_condition_random[:,1])), requires_grad=True)
+        t = Variable(torch.cat((c_condition_linear[:,2], c_condition_random[:,2])), requires_grad=True)
 
-            bc_dist_left   = ((bc_dist[:,0][2*self.BC_points2:3*self.BC_points2] *
-                              misc.psi(y[2*self.BC_points2:3*self.BC_points2], self.chi, self.size[3]) -
-                              self.c[2*self.BC_points2:3*self.BC_points2]).abs() +
-                              (bc_dist[:,1][2*self.BC_points2:3*self.BC_points2] -
-                               self.p[2*self.BC_points2:3*self.BC_points2]).abs())
-            yleft, t3 = self.make_BC_dist(bc_dist_left)
+        c, p, u = self.Boundary_conditions(x,y,t)
 
-            bc_dist_right  = (bc_dist[:,1][3*self.BC_points2:] - self.p[3*self.BC_points2:]).abs()
-            yright, t4 = self.make_BC_dist(bc_dist_right)
+        bc_dist = self.model([x,y,t], self.transform)
+        
+        bc_dist_top    = (bc_dist[:,2][:self.BC_points2] - p[:self.BC_points2]).abs()
+        xtop, t1       = self.make_BC_dist(bc_dist_top, x[:self.BC_points2], t[:self.BC_points2])
 
-            x = torch.cat((xtop,xbottom,torch.zeros(self.BC_points2),torch.ones(self.BC_points2)))
-            y = torch.cat((torch.ones(self.BC_points2),torch.zeros(self.BC_points2),yleft,yright))
-            t = torch.cat((t1,t2,t3,t4))
-            self.Boundary_conditions(x,y,t)
+        bc_dist_bottom = (bc_dist[:,2][self.BC_points2:2*self.BC_points2] - p[self.BC_points2:2*self.BC_points2]).abs()
+        xbottom, t2    = self.make_BC_dist(bc_dist_bottom, x[self.BC_points2:2*self.BC_points2], t[self.BC_points2:2*self.BC_points2])
+
+        bc_dist_left   = (bc_dist[:,0][2*self.BC_points2:3*self.BC_points2]  * \
+                          misc.psi(y[2*self.BC_points2:3*self.BC_points2], self.chi, self.size[3]) - \
+                          c[2*self.BC_points2:3*self.BC_points2]).abs() + \
+                         (bc_dist[:,1][2*self.BC_points2:3*self.BC_points2]  - \
+                          p[2*self.BC_points2:3*self.BC_points2]).abs()
+        yleft, t3      = self.make_BC_dist(bc_dist_left, y[2*self.BC_points2:3*self.BC_points2], t[2*self.BC_points2:3*self.BC_points2])
+
+        bc_dist_right  = (bc_dist[:,1][3*self.BC_points2:] - p[3*self.BC_points2:]).abs()
+        yright, t4     = self.make_BC_dist(bc_dist_right, y[3*self.BC_points2:], t[3*self.BC_points2:])
+
+        x = torch.cat((xtop,xbottom,torch.zeros(self.BC_points2),torch.ones(self.BC_points2)))
+        y = torch.cat((torch.ones(self.BC_points2),torch.zeros(self.BC_points2),yleft,yright))
+        t = torch.cat((t1,t2,t3,t4))
+        
+        # self.x_BC = Variable(torch.cat((c_condition_linear[:,0], x)), requires_grad=True)
+        # self.y_BC = Variable(torch.cat((c_condition_linear[:,1], y)), requires_grad=True)
+        # self.t_BC = Variable(torch.cat((c_condition_linear[:,2], t)), requires_grad=True)
 
         self.x_BC = Variable(x, requires_grad=True)
         self.y_BC = Variable(y, requires_grad=True)
         self.t_BC = Variable(t, requires_grad=True)
+        
+        
+        self.c, self.p, self.u = self.Boundary_conditions(self.x_BC, self.y_BC, self.t_BC)
 
     
     def transform(self, net, coords): 
-        # Ограничение концентрации от 0 до cmax
         eps = 0.001
         a = (self.cmax-eps) * torch.sigmoid(500*(net[:,0].clone() - self.cmax))
         net[:,0] *= torch.sigmoid(500*net[:,0]) + torch.sigmoid(500*(self.cmax - net[:,0])) - 1
@@ -362,70 +415,80 @@ class Poisson_Convection:
         px = prediction_PDE[:,1]
         py = prediction_PDE[:,2]
         
+        w_  = self.w_func(x, y)
         mu =  (1.0 - c / self.cmax).pow(self.beta)
 
-        u_x = -self.w_func(x, y)**2 * px / (12. * self.mu0 * mu)
-        u_y = -self.w_func(x, y)**2 * py / (12. * self.mu0 * mu)
+        u_x = -w_**2 * px / (12. * self.mu0 * mu)
+        u_y = -w_**2 * py / (12. * self.mu0 * mu)
 
-        c_x = misc.derivative(u_x * c * self.w_func(x, y), x)
-        c_y = misc.derivative(u_y * c * self.w_func(x, y), y)
-        c_t = misc.derivative(      c * self.w_func(x, y), t)
+        c_x = misc.derivative(u_x * c * w_, x)
+        c_y = misc.derivative(u_y * c * w_, y)
+        c_t = misc.derivative(      c * w_, t)
 
-        u_xx = misc.derivative(u_x, x)
-        u_yy = misc.derivative(u_y, y)
-
+        u_xx = misc.derivative(w_ * u_x, x)
+        u_yy = misc.derivative(w_ * u_y, y)
+        
         p_xy = misc.derivative(px, y)
         p_yx = misc.derivative(py, x)
 
-        u_ = (u_xx + u_yy)
-        c_ = (c_t + c_x + c_y)
+        u_ = (u_xx + u_yy) / w_.max()**3
+        c_ = (c_t + c_x + c_y) / w_.max()**3
         
         return c_, u_, p_xy-p_yx
 
+
+    def criterion(self, pred, true):
+        raw_loss = self.crit_func(pred, true)
+        minimum = torch.min((pred - true) ** 2)
+        maximum = torch.max((pred - true) ** 2)
+        normalized_loss = (raw_loss - minimum) / (maximum - minimum + 1e-8)
+        return raw_loss
+        
         
     def loss_function(self):
-        
-        start = self.k * time.time()
+    
         self.optimizer.zero_grad()
         
         # Initial condition
         predictions_IC = self.model([self.x_IC, self.y_IC, self.t_IC], self.transform)[:,0]
         loss_IC = self.weights[3] * self.criterion(predictions_IC, self.c_IC)
         self.IC.append(loss_IC.item())
-        if torch.isnan(loss_IC)==True:
-            raise ValueError("nan value reached")
         
         # Boundary conditions
         prediction_BC = self.model([self.x_BC, self.y_BC, self.t_BC], self.transform)
 
         prediction_c  = (prediction_BC[:,0][2*self.BC_points2:3*self.BC_points2] *
                          misc.psi(self.y_BC[2*self.BC_points2:3*self.BC_points2], self.chi, self.size[3]))
-        prediction_px = prediction_BC[:,1][2*self.BC_points2:]
-        prediction_py = prediction_BC[:,2][:2*self.BC_points2]
+        loss_BC = self.weights[4] * self.criterion(prediction_c[:self.BC_points2], self.c[2*self.BC_points2:3*self.BC_points2])
+
+        if self.weights[5]!=0:    
+            prediction_px = prediction_BC[:,1][2*self.BC_points2:]
+            prediction_py = prediction_BC[:,2][:2*self.BC_points2]
+            loss_BC += self.weights[5] * (self.criterion(prediction_py[:self.BC_points2], self.p[:self.BC_points2])                    +
+                                          self.criterion(prediction_py[self.BC_points2:], self.p[self.BC_points2:2*self.BC_points2])   +
+                                          self.criterion(prediction_px[:self.BC_points2], self.p[2*self.BC_points2:3*self.BC_points2]) +
+                                          self.criterion(prediction_px[self.BC_points2:], self.p[3*self.BC_points2:])                  )  
+
+        if self.weights[6]!=0 or self.weights[7]!=0:
+            prediction_ux = (prediction_BC[:,1] * -self.w_func(self.x_BC,self.y_BC)**2
+                             / 12 / misc.viscosity(self.mu0, prediction_BC[:,0], self.cmax, self.beta))[2*self.BC_points2:]
+            prediction_uy = (prediction_BC[:,2] * -self.w_func(self.x_BC,self.y_BC)**2
+                             / 12 / misc.viscosity(self.mu0, prediction_BC[:,0], self.cmax, self.beta))[:2*self.BC_points2]  
         
-        loss_BC = self.weights[4] * (self.criterion(prediction_py[:self.BC_points2], self.p[:self.BC_points2])                    +
-                                     self.criterion(prediction_py[self.BC_points2:], self.p[self.BC_points2:2*self.BC_points2])   +
-                                     self.criterion(prediction_px[:self.BC_points2], self.p[2*self.BC_points2:3*self.BC_points2]) +
-                                     self.criterion(prediction_px[self.BC_points2:], self.p[3*self.BC_points2:])                  )    
+        if self.weights[6]!=0:
+            loss_BC += self.weights[6] * (self.criterion(prediction_uy[:self.BC_points2], self.u[:self.BC_points2])                    +
+                                          self.criterion(prediction_uy[self.BC_points2:], self.u[self.BC_points2:2*self.BC_points2])   +
+                                          self.criterion(prediction_ux[:self.BC_points2], self.u[2*self.BC_points2:3*self.BC_points2]) +
+                                          self.criterion(prediction_ux[self.BC_points2:], self.u[3*self.BC_points2:])                  )    
                       
-        loss_BC += self.weights[5] * self.criterion(prediction_c[:self.BC_points2], self.c[2*self.BC_points2:3*self.BC_points2])
-
-        if self.compare_vel:
-            ux = (prediction_px * self.w_func(self.x_BC[2*self.BC_points2:], self.y_BC[2*self.BC_points2:])**2 / -12. /
-                  misc.viscosity(self.mu0, prediction_BC[:,0][2*self.BC_points2:], self.cmax, self.beta))
-            loss_BC += self.weights[6] * self.criterion(ux[:self.BC_points2],ux[self.BC_points2:])
-
-            uy = (prediction_py * self.w_func(self.x_BC[:2*self.BC_points2], self.y_BC[:2*self.BC_points2])**2 / -12. /
-                  misc.viscosity(self.mu0, prediction_BC[:,0][:2*self.BC_points2], self.cmax, self.beta))
-            loss_BC += self.weights[6] * self.criterion(uy[:self.BC_points2],uy[self.BC_points2:])
+        if self.weights[7]!=0:
+            loss_BC += self.weights[7] * self.criterion(prediction_ux[:self.BC_points2],prediction_ux[self.BC_points2:])
+            loss_BC += self.weights[7] * self.criterion(prediction_uy[:self.BC_points2],prediction_uy[self.BC_points2:])
         
         self.BC.append(loss_BC.item())
-            
-        if torch.isnan(loss_BC)==True:
-            raise ValueError("nan value reached")
 
         # PDE   
-        conv, div, pxy = self.compute_PDE(self.X, self.Y, self.T)
+        conv, div, pxy = self.compute_PDE(self.x_PDE, self.y_PDE, self.t_PDE)
         loss_c   = self.criterion(conv, torch.zeros_like(conv))
         loss_p   = self.criterion(div, torch.zeros_like(div))
         loss_PDE = self.weights[0] * loss_c + self.weights[1] * loss_p
@@ -433,10 +496,6 @@ class Poisson_Convection:
 
         self.PDE.append(loss_PDE.item())
         self.corr.append(loss_corr.item())
-        if torch.isnan(loss_PDE)==True:
-            raise ValueError("nan value reached")
-        if torch.isnan(loss_corr)==True:
-            raise ValueError("nan value reached")
 
         loss = (loss_PDE   +
                 loss_BC    +
@@ -445,22 +504,18 @@ class Poisson_Convection:
 
         loss.backward()
         self.losses.append(loss.item())
-
-        if self.adaptive_points==True and self.epoch%self.adaptive_freq==0 and self.epoch>self.Adam_epochs: 
-            self.make_distributed_points()
-            print('points adapted')
         
-        end = self.k * time.time()
-
         if self.epoch % self.k == 0:
-            self.print_tab.add_rows([['|', f'{self.epoch}\t',         '|',
-                                    f'{round(loss_PDE.item(),  6)}\t','|',
-                                    f'{round(loss_corr.item(), 6)}\t','|',
-                                    f'{round(loss_IC.item(),   6)}\t','|',
-                                    f'{round(loss_BC.item(),   6)}\t','|',
-                                    f'{round(self.losses[-1],  6)}\t','|',
-                                    f'{round(end - start, 6)}',       '|']])
+            self.end = time.time()
+            self.print_tab.add_rows([['|', f'{self.epoch}\t',             '|',
+                                    f'{round(loss_PDE.item(),  6)}\t',    '|',
+                                    f'{round(loss_corr.item(), 6)}\t',    '|',
+                                    f'{round(loss_IC.item(),   6)}\t',    '|',
+                                    f'{round(loss_BC.item(),   6)}\t',    '|',
+                                    f'{round(self.losses[-1],  6)}\t',    '|',
+                                    f'{round(self.end - self.start, 6)}', '|']])
             print(self.print_tab.draw())
+            self.start = time.time()
         self.epoch += 1
         return loss
         
@@ -475,18 +530,17 @@ class Poisson_Convection:
 
         self.optimizer = self.model.set_optimizer('NAdam')
 
-        while self.epoch<=self.max_epoch:
-            print ('Adam')
+        for i in range(self.max_iter):
             while self.epoch <= self.Adam_epochs+1:
                 self.optimizer = self.model.set_optimizer('NAdam')
                 self.optimizer.step(self.loss_function)
-            print ('LBFGS')
-            self.optimizer = self.model.set_optimizer('LBFGS',self.adaptive_freq)
+                
+            self.optimizer = self.model.set_optimizer('LBFGS', self.max_epoch)
             self.optimizer.step(self.loss_function)
-            self.make_distributed_points()
-            self.Adam_epochs = self.epoch+100
-            # self.save(f'{self.epoch}')
-            
+            self.Adam_epochs += self.epoch
+            if self.save_after:
+                self.save(self.path+f'/{self.epoch}')    
+            # self.make_distributed_points()
             print ('update')
 
     
@@ -527,16 +581,27 @@ class Poisson_Convection:
             return mu.data.cpu().numpy()
 
     def get_conv(self, x, y, t):
-        with torch.no_grad():
-            pred = self.model([x,y,t], self.transform)
-            ux = self.get_ux(x,y,t)
-            uy = self.get_uy(x,y,t)
-            conv = misc.derivative(self.w_func(x,y)*pred[:,0], t) + misc.derivative(self.w_func(x,y)*pred[:,0]*ux, x) + misc.derivative(self.w_func(x,y)*pred[:,0]*uy, y)
-            return conv.data.cpu().numpy()
-    
+        pred = self.model([x,y,t], self.transform)
+        ux = pred[:,1] * self.w_func(x,y)**2 / (-12 * misc.viscosity(self.mu0, pred[:,0], self.cmax, self.beta))
+        uy = pred[:,2] * self.w_func(x,y)**2 / (-12 * misc.viscosity(self.mu0, pred[:,0], self.cmax, self.beta))
+        с_t = misc.derivative(self.w_func(x,y)*pred[:,0], t).data.cpu().numpy()
+        c_x = misc.derivative(self.w_func(x,y)*pred[:,0]*ux, x).data.cpu().numpy()
+        c_y = misc.derivative(self.w_func(x,y)*pred[:,0]*uy, y).data.cpu().numpy()
+        conv =  c_x + c_y + с_t
+        return conv
+
     def get_div(self, x, y, t):
-        with torch.no_grad():
-            ux = self.get_ux(x,y,t)
-            uy = self.get_uy(x,y,t)
-            div = misc.derivative(ux,x) + misc.derivative(uy,y)
-            return div.data.cpu().numpy()
+        pred = self.model([x,y,t], self.transform)
+        ux = pred[:,1] * self.w_func(x,y)**2 / (-12 * misc.viscosity(self.mu0, pred[:,0], self.cmax, self.beta))
+        uy = pred[:,2] * self.w_func(x,y)**2 / (-12 * misc.viscosity(self.mu0, pred[:,0], self.cmax, self.beta))
+        uxx = misc.derivative(ux,x).data.cpu().numpy()
+        uyy = misc.derivative(uy,y).data.cpu().numpy()
+        div = uxx + uyy
+        return div
+        
+    def get_corr(self, x, y, t):
+        pred = self.model([x,y,t], self.transform)
+        pxy = misc.derivative(pred[:,1],y).data.cpu().numpy()
+        pyx = misc.derivative(pred[:,2],x).data.cpu().numpy()
+        corr = pxy - pyx
+        return corr

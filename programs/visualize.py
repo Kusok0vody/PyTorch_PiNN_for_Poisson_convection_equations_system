@@ -5,68 +5,92 @@ import os
 
 def plot_results(data,
                  limits:list,
-                 t:np.float64,
-                 Nx:int,
-                 Ny:int,
-                 clims:list=False):
-  """
-  Plots data from Neural Network
-
-  Parameters:
-  -----------
-  data : array of arrays
-    Array with c and p
-  limits : list[np.float64]
+                 t:list,
+                 cmaps:list=['turbo']*6,
+                 title:list=None,
+                 lims:list=None
+                 ):
+    """
+    Plots data from Neural Network
+    
+    Parameters:
+    -----------
+    data : array of arrays
+    Arrays of two arrays
+    limits : list[np.float64]
     Limits of plot
-  t : np.float64
+    t : np.float64
     End time
-  net
+    net
     Neural Network
-  Nx : int
+    Nx : int
     Number of points on the x axis
-  Ny : int
+    Ny : int
     Number of points on the x axis
-  clims : list
+    clims : list
     Array of limits for colourbars
     
-  Returns
-  -------
-  data : list
+    Returns
+    -------
+    data : list
     Array of the first and the last frames
-  """
-  x_min = limits[0]
-  x_max = limits[1]
-  y_min = limits[2]
-  y_max = limits[3]
+    """
+    x_min = limits[0]
+    x_max = limits[1]
+    y_min = limits[2]
+    y_max = limits[3]
+    
+    if title==None:
+      title = np.array([f'$f_{i}$ at $t={t[0]}$' for i in range(1,4)] + [f'$f_{i}$ at $t={t[1]}$' for i in range(1,4)])
 
-  dx = (x_max - x_min) / (Nx - 1)
-  dy = (y_max - y_min) / (Ny - 1)
-  x = np.arange(x_min, x_max+dx/2, dx)
-  y = np.arange(y_min, y_max+dy/2, dy)
-  tt = [0,t,0,t]
-  
-  mesh_x, mesh_y = np.meshgrid(x, y)
-  images = []
-  
-  fig, axes = plt.subplots(nrows=2,ncols=3,dpi=150, 
-                  gridspec_kw={"width_ratios":[1,1,0.05]})
-  fig.subplots_adjust(wspace=0.6)
+    if lims==None:
+        lims = [np.min(data[0]), np.max(data[3]), np.min(data[1]), np.max(data[4]), np.min(data[2]), np.max(data[5])]
 
-  for i in range(2):
-      for j in range(2):
-        im = axes[i,j].pcolormesh(mesh_x, mesh_y, data[2*i+j], cmap='turbo')
-        axes[i,j].set_title(f"t={tt[2*i+j]}")
-        axes[i,j].set_aspect('equal', 'box')
-        axes[i,j].set_xticks(np.arange(x_min, x_max+dx/2, 0.2))
-        axes[i,j].set_yticks(np.arange(y_min, y_max+dy/2, 0.2))
-        images.append(im)
-        if clims==False:
-          images[-1].set_clim(np.min((data[2*i], data[2*i+1])), np.max((data[2*i], data[2*i+1])))
-        else:
-          images[-1].set_clim(clims[2*i],clims[2*i+1])
-      fig.colorbar(im, cax=axes[i,j+1])
-  fig.tight_layout()
-  plt.show()
+    fig = plt.figure(figsize=(12,10))
+
+    i = 0
+
+    plt.subplot(231)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[0], vmax=lims[1], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.colorbar(location='bottom')
+    plt.gca().invert_yaxis()
+    i+=1
+
+    plt.subplot(232)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[2], vmax=lims[3], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.colorbar(location='bottom')
+    plt.gca().invert_yaxis()
+    i+=1
+
+    plt.subplot(233)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[4], vmax=lims[5], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.colorbar(location='bottom')
+    plt.gca().invert_yaxis()
+    i+=1
+
+    plt.subplot(234)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[0], vmax=lims[1], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.gca().invert_yaxis()
+    i+=1
+    
+    plt.subplot(235)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[2], vmax=lims[3], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.gca().invert_yaxis()
+    i+=1
+
+    plt.subplot(236)
+    plt.imshow(data[i], cmap=cmaps[i], vmin=lims[4], vmax=lims[5], extent=[x_min,x_max,y_max,y_min])
+    plt.title(title[i])
+    plt.gca().invert_yaxis()
+    i+=1
+
+    fig.tight_layout()
+    plt.show()
 
 
 def plot(data:np.ndarray, limits:list=False, title:str=None, clim:list=None):
@@ -93,61 +117,46 @@ def plot(data:np.ndarray, limits:list=False, title:str=None, clim:list=None):
     plt.clim(clim[0],clim[1])
 
 
-def plot_BC(data:np.ndarray, x:np.ndarray, y:np.ndarray, dx:np.float64, dy:np.float64, BC_types:list):
-  """
-  Plots boundaries with specified types (Neumann is 1 and Dirichlet is any other value) 
-  
-  Parameters:
-  -----------
-  data : np.ndarray
-  x : np.ndarray
+def plot_BC(data_tb:np.ndarray, data_lr:np.ndarray, x:np.ndarray, y:np.ndarray):
+    """
+    Plots boundaries with specified types (Neumann is 1 and Dirichlet is any other value) 
+    
+    Parameters:
+    -----------
+    data_tb : np.ndarray
+    data_lr : np.ndarray
+    x : np.ndarray
     Array of points of x axis
-  x : np.ndarray
+    x : np.ndarray
     Array of points of y axis
-  dx : np.float64
+    dx : np.float64
     Step between x points
-  dy : np.float64
+    dy : np.float64
     Step between y points
-  BC_types : list
+    BC_types : list
     Array of conditions
-  """
-  plt.figure(figsize=(7, 7))
-
-  plt.subplot(221)
-  if BC_types[0]==1:
-    plt.plot(x, (data[-1] - data[-2]) / dy, c='black')
-  else:
-    plt.plot(x, data[0], c='black')
-  plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
-  plt.grid()
-  plt.title('Top')
-
-  plt.subplot(222)
-  if BC_types[1]==1:
-    plt.plot(x, (data[0] - data[1])/ dy, c='black')
-  else:
-    plt.plot(x, data[-1], c='black')
-  plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
-  plt.grid()
-  plt.title('Bottom')
-
-  plt.subplot(223)
-  if BC_types[2]==1:
-    plt.plot(y, (data[:,0] - data[:,1]) / dx, c='black')
-  else:
-    plt.plot(y, data[:,0], c='black')
-  plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
-  plt.grid()
-  plt.title('Left')
-
-  plt.subplot(224)
-  if BC_types[3]==1:
-    plt.plot(y, (data[:,-1] - data[:,-2]) / dx, c='black')
-  else:
-    plt.plot(y, data[:,-1], c='black')
-  plt.xticks(np.arange(np.min(x), np.max(x)+dx/2, 10*dx))
-  plt.grid()
-  plt.title('Right')
+    """
+    plt.figure(figsize=(7, 7))
+    
+    plt.subplot(221)
+    plt.plot(x, data_tb[0], c='black')
+    plt.grid()
+    plt.title('Top')
+    
+    plt.subplot(222)
+    plt.plot(x, data_tb[-1], c='black')
+    plt.grid()
+    plt.title('Bottom')
+    
+    plt.subplot(223)
+    plt.plot(y, data_lr[:,0], c='black')
+    plt.grid()
+    plt.title('Left')
+    
+    plt.subplot(224)
+    plt.plot(y, data_lr[:,-1], c='black')
+    plt.grid()
+    plt.title('Right')
 
 
 def plot_loss(loss):

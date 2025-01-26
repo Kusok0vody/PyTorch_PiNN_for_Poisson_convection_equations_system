@@ -36,7 +36,7 @@ class Net(nn.Module):
         layerDict = OrderedDict(layers)
         self.layers = torch.nn.Sequential(layerDict)
 
-    def forward(self, inputs: list, transform_func=None):
+    def forward(self, inputs: list, transform_func=None, denormalize=None):
         """
         Forward pass through the network.
         Concatenates the input tensors and feeds them through the layers.
