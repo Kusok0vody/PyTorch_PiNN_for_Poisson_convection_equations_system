@@ -60,7 +60,6 @@ class Net(nn.Module):
             return torch.optim.NAdam(self.parameters(), weight_decay=1e-5)
         if optimizer_type=='LBFGS':
             return torch.optim.LBFGS(self.parameters(),
-                                     # lr=0.1, 
                                      max_iter=max_iter, 
                                      max_eval=max_iter, 
                                      history_size=200,

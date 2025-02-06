@@ -11,26 +11,26 @@ class Sin(nn.Module):
     """
     sin activation function for Neural Network
     """
-    def __init__(self, f):
+    def __init__(self, f=1.0):
         super().__init__()
         self.name = 'Sin'
         self.f = f
 
-    def forward(self, input:torch.Tensor) -> torch.Tensor:
-        return torch.sin(self.f * input)
+    def forward(self, inp:torch.Tensor) -> torch.Tensor:
+        return torch.sin(self.f * inp)
     
 
 class Cos(nn.Module):
     """
     sin activation function for Neural Network
     """
-    def __init__(self, f):
+    def __init__(self, f=1.0):
         super().__init__()
         self.name = 'Cos'
         self.f = f
 
-    def forward(self, input:torch.Tensor) -> torch.Tensor:
-        return torch.cos(self.f * input)
+    def forward(self, inp:torch.Tensor) -> torch.Tensor:
+        return torch.cos(self.f * inp)
         
 
 class Wave(nn.Module):
@@ -40,8 +40,48 @@ class Wave(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, input):
-        return torch.cos(input) + torch.sin(input)
+    def forward(self, inp):
+        return torch.cos(inp) + torch.sin(inp)
+
+
+class Morlet(nn.Module):
+    """
+    cos(x*7/4)e^(-x^2/2)
+    """
+    def __init__(self):
+        super().__init__()
+        self.name = 'Morlet'
+    
+    def forward(self, inp):
+        c1 = 7/4
+        c2 = -1/2
+        return torch.cos(c1*inp)*torch.exp(inp*inp*c2)
+
+
+class MexicanHat(nn.Module):
+    """
+    (1-x^2)e^(-x^2/2)
+    """
+    def __init__(self):
+        super().__init__()
+        self.name = 'MexicanHat'
+    
+    def forward(self, inp):
+        c1 = -1/2
+        return (1-inp*inp)*torch.exp(inp*inp*c1)
+
+
+class GaussianWawelet(nn.Module):
+    """
+    -x*e^(-x^2/2)
+    """
+    def __init__(self):
+        super().__init__()
+        self.name = 'GaussianWawelet'
+    
+    def forward(self, inp):
+        c1 = -1/2
+        return -1*inp*torch.exp(inp*inp*c1)
 
 
 class OutputHook(list):
